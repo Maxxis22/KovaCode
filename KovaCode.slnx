@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="KovaCode/KovaCode.vcxproj" Id="8548691e-979f-46fd-aa8b-d69e946df4bd" />
+</Solution>
