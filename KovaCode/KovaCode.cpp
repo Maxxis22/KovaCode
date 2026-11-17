@@ -10,6 +10,8 @@
 
 #pragma comment(lib, "Dwmapi.lib")
 
+#pragma comment(lib, "Wininet.lib")
+
 
 
 #include <windows.h>
@@ -24,6 +26,8 @@
 
 #include <dwmapi.h>
 
+#include <wininet.h>
+
 #include <stdio.h>
 
 #include <string.h>
@@ -35,6 +39,8 @@
 #include <string>
 
 #include <unordered_set>
+
+#include <set>
 
 #include <algorithm>
 
@@ -66,6 +72,14 @@
 
 #define MARKER_SAVED            1
 
+#define MARKER_ERROR            2
+
+#define INDIC_WORD_HIGHLIGHT    8
+
+
+
+#define IDT_OUTLINE_UPDATE      101
+
 
 
 #define IDM_FILE_NEW            1000
@@ -79,6 +93,8 @@
 #define IDM_FILE_OPEN_FOLDER    1004
 
 #define IDM_FILE_EXIT           1005
+
+#define IDM_FILE_SAVEALL        1023
 
 
 
@@ -98,15 +114,45 @@
 
 #define IDM_EDIT_LINE_DOWN      1013
 
+#define IDM_EDIT_AUTOCOMPLETE   1018
+
+#define IDM_EDIT_FORMAT_CODE    1024
+
+#define IDM_EDIT_SELECT_ALL_OCC 1030
+
+#define IDM_EDIT_FOLD_ALL       1031
+
+#define IDM_EDIT_UNFOLD_ALL     1032
+
 
 
 #define IDM_RUN_SMART           1014
+
+#define IDM_RUN_AND_UPLOAD      1028
 
 #define IDM_SET_COMPILER        1015
 
 #define IDM_CLEAR_CONSOLE       1016
 
 #define IDM_ABOUT               1017
+
+#define IDM_CHANGELOG           1029
+
+#define IDM_FTP_MANAGER         1026
+
+#define IDM_FTP_UPLOAD_ACTIVE   1027
+
+
+
+#define IDM_VIEW_OUTLINE        1019
+
+#define IDM_VIEW_WORDWRAP       1025
+
+#define IDM_VIEW_ZOOM_IN        1020
+
+#define IDM_VIEW_ZOOM_OUT       1021
+
+#define IDM_VIEW_ZOOM_RESET     1022
 
 
 
@@ -118,11 +164,23 @@
 
 #define IDM_TAB_COPY_PATH       1103
 
+#define IDM_TAB_CLOSE_CURRENT   1104
+
+#define IDM_TAB_NEXT            1105
+
+#define IDM_TAB_PREV            1106
+
 
 
 #define IDM_THEME_DARK          2001
 
 #define IDM_THEME_LIGHT         2002
+
+#define IDM_THEME_CYBER         2004
+
+#define IDM_THEME_MONOKAI       2005
+
+#define IDM_THEME_ONEDARK       2006
 
 #define IDM_THEME_TOGGLE        2003
 
@@ -166,7 +224,9 @@ enum Lang {
 
     LANG_PY,
 
-    LANG_HTML
+    LANG_HTML,
+
+    LANG_CFG
 
 };
 
@@ -260,7 +320,79 @@ HWND hEditGotoBox = NULL;
 
 bool isDarkTheme = true;
 
+int currentTheme = 0; // 0=Dark+, 1=Light+, 2=Cyber Neon, 3=Monokai Pro, 4=One Dark Pro
+
 int currentLang = 0; // 0=RU, 1=EN, 2=DE, 3=FR, 4=IT
+
+
+
+bool g_showOutline = true;
+
+int g_outlineWidth = 240;
+
+int g_hoverOutlineIdx = -1;
+
+int g_outlineScroll = 0;
+
+bool g_hoverOutlineClose = false;
+
+RECT g_rcOutlineClose = { 0, 0, 0, 0 };
+
+
+
+bool g_wordWrap = false;
+
+bool g_findMatchCase = false;
+
+
+
+// FTP-клиент (WinINet)
+
+HINTERNET g_hInet = NULL;
+
+HINTERNET g_hFtp = NULL;
+
+HWND hwndFtpDlg = NULL;
+
+HWND hwndChangelogDlg = NULL;
+
+wchar_t szFtpHost[128] = L"";
+
+int g_ftpPort = 21;
+
+wchar_t szFtpUser[128] = L"";
+
+wchar_t szFtpPass[128] = L"";
+
+wchar_t szFtpRemoteDir[512] = L"/";
+
+bool g_ftpPassive = true;
+
+bool g_ftpAutoUploadOnSave = false;
+
+
+
+#define MAX_FTP_PROFILES 8
+
+struct FtpProfile {
+
+    std::wstring name;
+
+    std::wstring host;
+
+    int port;
+
+    std::wstring user;
+
+    std::wstring pass;
+
+    std::wstring remoteDir;
+
+    bool passive;
+
+};
+
+std::vector<FtpProfile> g_ftpProfiles;
 
 
 
@@ -304,6 +436,20 @@ int g_contextMenuTabIdx = -1;
 
 
 
+struct OutlineItem {
+
+    std::wstring label;
+
+    int line;
+
+    int kind; // 0=fn, 1=ev/cmd/cvar, 2=#def/type/cls, 3=section
+
+    RECT rc;
+
+};
+
+
+
 struct TabData {
 
     HWND hwndEditor;
@@ -317,6 +463,10 @@ struct TabData {
     RECT rcTab;
 
     RECT rcClose;
+
+    std::vector<OutlineItem> outline;
+
+    std::wstring ftpRemotePath;
 
 };
 
@@ -348,13 +498,33 @@ std::vector<ToolbarButton> g_toolbarButtons;
 
 
 
+const wchar_t* GetThemeName(int theme) {
+
+    switch (theme) {
+
+    case 1:  return L"VS Code Light+";
+
+    case 2:  return L"Cyber Neon / Dracula";
+
+    case 3:  return L"Monokai Pro";
+
+    case 4:  return L"One Dark Pro";
+
+    default: return L"VS Code Dark+";
+
+    }
+
+}
+
+
+
 // ============================================================
 
 //  ЛОКАЛИЗАЦИЯ (5 ЯЗЫКОВ)
 
 // ============================================================
 
-const wchar_t* loc[][16] = {
+const wchar_t* loc[][24] = {
 
     // RU
 
@@ -370,7 +540,11 @@ const wchar_t* loc[][16] = {
 
         L"Сборка", L"Скомпилировать / Запустить\tF5", L"Выбрать spcomp.exe...",
 
-        L"Настройки"
+        L"Настройки", L"Сохранить всё\tCtrl+Shift+S", L"Автодополнение\tCtrl+Space",
+
+        L"Форматировать код\tShift+Alt+F", L"Вид", L"Структура кода\tCtrl+B",
+
+        L"Перенос по словам\tAlt+Z", L"Увеличить масштаб\tCtrl++", L"Уменьшить масштаб\tCtrl+-"
 
     },
 
@@ -388,7 +562,11 @@ const wchar_t* loc[][16] = {
 
         L"Build", L"Compile / Run\tF5", L"Select spcomp.exe...",
 
-        L"Settings"
+        L"Settings", L"Save All\tCtrl+Shift+S", L"AutoComplete\tCtrl+Space",
+
+        L"Format Code\tShift+Alt+F", L"View", L"Code Outline\tCtrl+B",
+
+        L"Word Wrap\tAlt+Z", L"Zoom In\tCtrl++", L"Zoom Out\tCtrl+-"
 
     },
 
@@ -406,7 +584,11 @@ const wchar_t* loc[][16] = {
 
         L"Erstellen", L"Kompilieren / Ausführen\tF5", L"Wähle spcomp.exe...",
 
-        L"Einstellungen"
+        L"Einstellungen", L"Alle speichern\tCtrl+Shift+S", L"Autovervollständigung\tCtrl+Space",
+
+        L"Code formatieren\tShift+Alt+F", L"Ansicht", L"Code-Gliederung\tCtrl+B",
+
+        L"Zeilenumbruch\tAlt+Z", L"Vergrößern\tCtrl++", L"Verkleinern\tCtrl+-"
 
     },
 
@@ -424,7 +606,11 @@ const wchar_t* loc[][16] = {
 
         L"Construire", L"Compiler / Exécuter\tF5", L"Sélectionner spcomp.exe...",
 
-        L"Paramètres"
+        L"Paramètres", L"Tout enregistrer\tCtrl+Shift+S", L"Complétion auto\tCtrl+Space",
+
+        L"Formater le code\tShift+Alt+F", L"Affichage", L"Structure du code\tCtrl+B",
+
+        L"Retour à la ligne\tAlt+Z", L"Zoom avant\tCtrl++", L"Zoom arrière\tCtrl+-"
 
     },
 
@@ -442,7 +628,11 @@ const wchar_t* loc[][16] = {
 
         L"Costruisci", L"Compila / Esegui\tF5", L"Seleziona spcomp.exe...",
 
-        L"Impostazioni"
+        L"Impostazioni", L"Salva tutto\tCtrl+Shift+S", L"Completamento auto\tCtrl+Space",
+
+        L"Formatta codice\tShift+Alt+F", L"Visualizza", L"Struttura codice\tCtrl+B",
+
+        L"A capo automatico\tAlt+Z", L"Ingrandisci\tCtrl++", L"Rimpicciolisci\tCtrl+-"
 
     }
 
@@ -538,16 +728,6 @@ HMODULE LoadScintillaSmart() {
 
     }
 
-
-
-    for (int d = 0; d < 2; d++) {
-
-        HMODULE h = LoadLibraryW(dllNames[d]);
-
-        if (h) return h;
-
-    }
-
     return NULL;
 
 }
@@ -632,19 +812,211 @@ void LoadAppIconSmart(HINSTANCE hInstance) {
 
 // ============================================================
 
-//  СОХРАНЕНИЕ И ЗАГРУЗКА КОНФИГУРАЦИИ + СЕССИИ ВКЛАДОК (kovacode.ini)
+//  АВТОПОИСК SPCOMP И СОХРАНЕНИЕ / ЗАГРУЗКА КОНФИГУРАЦИИ
 
 // ============================================================
 
+static bool IsValidWindowsExe(const wchar_t* path) {
+
+    if (!path || !*path) return false;
+
+    FILE* fp = NULL;
+
+    if (_wfopen_s(&fp, path, L"rb") != 0 || !fp) return false;
+
+    IMAGE_DOS_HEADER dos = { 0 };
+
+    bool ok = false;
+
+    if (fread(&dos, sizeof(dos), 1, fp) == 1 && dos.e_magic == IMAGE_DOS_SIGNATURE) {
+
+        if (dos.e_lfanew > 0 && dos.e_lfanew < 0x100000) {
+
+            if (fseek(fp, dos.e_lfanew, SEEK_SET) == 0) {
+
+                DWORD peSig = 0;
+
+                if (fread(&peSig, sizeof(peSig), 1, fp) == 1 && peSig == IMAGE_NT_SIGNATURE) {
+
+                    ok = true;
+
+                }
+
+            }
+
+        }
+
+    }
+
+    fclose(fp);
+
+    return ok;
+
+}
+
+
+
+void AutoDetectSpcompSmart() {
+
+    if (wcslen(szCompilerPath) > 0 &&
+
+        GetFileAttributesW(szCompilerPath) != INVALID_FILE_ATTRIBUTES &&
+
+        IsValidWindowsExe(szCompilerPath)) {
+
+        return;
+
+    }
+
+    szCompilerPath[0] = 0;
+
+
+
+    const wchar_t* candidates[] = {
+
+        L"compilers\\1.11\\addons\\sourcemod\\scripting\\spcomp64.exe",
+
+        L"compilers\\1.11\\addons\\sourcemod\\scripting\\spcomp.exe",
+
+        L"compilers\\1.11\\spcomp64.exe",
+
+        L"compilers\\1.11\\spcomp.exe",
+
+        L"..\\compilers\\1.11\\addons\\sourcemod\\scripting\\spcomp64.exe",
+
+        L"..\\compilers\\1.11\\addons\\sourcemod\\scripting\\spcomp.exe",
+
+        L"..\\..\\compilers\\1.11\\addons\\sourcemod\\scripting\\spcomp64.exe",
+
+        L"..\\..\\compilers\\1.11\\addons\\sourcemod\\scripting\\spcomp.exe",
+
+        L"..\\KovaCode\\compilers\\1.11\\addons\\sourcemod\\scripting\\spcomp64.exe",
+
+        L"..\\KovaCode\\compilers\\1.11\\addons\\sourcemod\\scripting\\spcomp.exe",
+
+        L"..\\KovaCode\\compilers\\1.11\\spcomp64.exe",
+
+        L"..\\KovaCode\\compilers\\1.11\\spcomp.exe",
+
+        L"..\\..\\KovaCode\\compilers\\1.11\\addons\\sourcemod\\scripting\\spcomp64.exe",
+
+        L"..\\..\\KovaCode\\compilers\\1.11\\addons\\sourcemod\\scripting\\spcomp.exe",
+
+        L"..\\..\\KovaCode\\compilers\\1.11\\spcomp64.exe",
+
+        L"..\\..\\KovaCode\\compilers\\1.11\\spcomp.exe",
+
+        L"spcomp64.exe",
+
+        L"spcomp.exe"
+
+    };
+
+
+
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+
+        wchar_t raw[MAX_PATH] = { 0 };
+
+        swprintf(raw, MAX_PATH, L"%s%s", szExeDir, candidates[i]);
+
+        if (GetFileAttributesW(raw) != INVALID_FILE_ATTRIBUTES && IsValidWindowsExe(raw)) {
+
+            wchar_t full[MAX_PATH] = { 0 };
+
+            if (GetFullPathNameW(raw, MAX_PATH, full, NULL) > 0) {
+
+                wcscpy_s(szCompilerPath, full);
+
+                return;
+
+            }
+
+        }
+
+    }
+
+}
+
+
+
 void LoadConfig() {
 
-    isDarkTheme = GetPrivateProfileIntW(L"Settings", L"DarkTheme", 1, szIniPath) != 0;
+    int savedTheme = GetPrivateProfileIntW(L"Settings", L"Theme", -1, szIniPath);
+
+    if (savedTheme >= 0 && savedTheme <= 4) {
+
+        currentTheme = savedTheme;
+
+    }
+
+    else {
+
+        currentTheme = (GetPrivateProfileIntW(L"Settings", L"DarkTheme", 1, szIniPath) != 0) ? 0 : 1;
+
+    }
+
+    isDarkTheme = (currentTheme != 1);
 
     currentLang = GetPrivateProfileIntW(L"Settings", L"Language", 0, szIniPath);
 
     if (currentLang < 0 || currentLang > 4) currentLang = 0;
 
+    g_showOutline = GetPrivateProfileIntW(L"Settings", L"ShowOutline", 1, szIniPath) != 0;
+
+    g_wordWrap = GetPrivateProfileIntW(L"Settings", L"WordWrap", 0, szIniPath) != 0;
+
     GetPrivateProfileStringW(L"Compiler", L"SpcompPath", L"", szCompilerPath, MAX_PATH, szIniPath);
+
+    GetPrivateProfileStringW(L"FTP", L"Host", L"", szFtpHost, 128, szIniPath);
+
+    g_ftpPort = GetPrivateProfileIntW(L"FTP", L"Port", 21, szIniPath);
+
+    if (g_ftpPort <= 0 || g_ftpPort > 65535) g_ftpPort = 21;
+
+    GetPrivateProfileStringW(L"FTP", L"User", L"", szFtpUser, 128, szIniPath);
+
+    GetPrivateProfileStringW(L"FTP", L"Pass", L"", szFtpPass, 128, szIniPath);
+
+    GetPrivateProfileStringW(L"FTP", L"RemoteDir", L"/", szFtpRemoteDir, 512, szIniPath);
+
+    g_ftpPassive = GetPrivateProfileIntW(L"FTP", L"Passive", 1, szIniPath) != 0;
+
+    g_ftpAutoUploadOnSave = GetPrivateProfileIntW(L"FTP", L"AutoUpload", 0, szIniPath) != 0;
+
+    g_ftpProfiles.clear();
+
+    int pCount = GetPrivateProfileIntW(L"FTPProfiles", L"Count", 0, szIniPath);
+
+    if (pCount > MAX_FTP_PROFILES) pCount = MAX_FTP_PROFILES;
+
+    for (int i = 0; i < pCount; i++) {
+
+        wchar_t key[32], buf[512];
+
+        FtpProfile p;
+
+        swprintf(key, 32, L"P%d_Name", i); GetPrivateProfileStringW(L"FTPProfiles", key, L"", buf, 128, szIniPath); p.name = buf;
+
+        swprintf(key, 32, L"P%d_Host", i); GetPrivateProfileStringW(L"FTPProfiles", key, L"", buf, 128, szIniPath); p.host = buf;
+
+        swprintf(key, 32, L"P%d_Port", i); p.port = GetPrivateProfileIntW(L"FTPProfiles", key, 21, szIniPath);
+
+        if (p.port <= 0 || p.port > 65535) p.port = 21;
+
+        swprintf(key, 32, L"P%d_User", i); GetPrivateProfileStringW(L"FTPProfiles", key, L"", buf, 128, szIniPath); p.user = buf;
+
+        swprintf(key, 32, L"P%d_Pass", i); GetPrivateProfileStringW(L"FTPProfiles", key, L"", buf, 128, szIniPath); p.pass = buf;
+
+        swprintf(key, 32, L"P%d_Dir", i);  GetPrivateProfileStringW(L"FTPProfiles", key, L"/", buf, 512, szIniPath); p.remoteDir = buf;
+
+        swprintf(key, 32, L"P%d_Pasv", i); p.passive = GetPrivateProfileIntW(L"FTPProfiles", key, 1, szIniPath) != 0;
+
+        if (!p.host.empty()) g_ftpProfiles.push_back(p);
+
+    }
+
+    AutoDetectSpcompSmart();
 
 }
 
@@ -652,15 +1024,69 @@ void LoadConfig() {
 
 void SaveConfig() {
 
+    isDarkTheme = (currentTheme != 1);
+
     WritePrivateProfileStringW(L"Settings", L"DarkTheme", isDarkTheme ? L"1" : L"0", szIniPath);
 
     wchar_t buf[32];
+
+    swprintf(buf, 32, L"%d", currentTheme);
+
+    WritePrivateProfileStringW(L"Settings", L"Theme", buf, szIniPath);
 
     swprintf(buf, 32, L"%d", currentLang);
 
     WritePrivateProfileStringW(L"Settings", L"Language", buf, szIniPath);
 
+    WritePrivateProfileStringW(L"Settings", L"ShowOutline", g_showOutline ? L"1" : L"0", szIniPath);
+
+    WritePrivateProfileStringW(L"Settings", L"WordWrap", g_wordWrap ? L"1" : L"0", szIniPath);
+
     WritePrivateProfileStringW(L"Compiler", L"SpcompPath", szCompilerPath, szIniPath);
+
+    WritePrivateProfileStringW(L"FTP", L"Host", szFtpHost, szIniPath);
+
+    swprintf(buf, 32, L"%d", g_ftpPort);
+
+    WritePrivateProfileStringW(L"FTP", L"Port", buf, szIniPath);
+
+    WritePrivateProfileStringW(L"FTP", L"User", szFtpUser, szIniPath);
+
+    WritePrivateProfileStringW(L"FTP", L"Pass", szFtpPass, szIniPath);
+
+    WritePrivateProfileStringW(L"FTP", L"RemoteDir", szFtpRemoteDir, szIniPath);
+
+    WritePrivateProfileStringW(L"FTP", L"Passive", g_ftpPassive ? L"1" : L"0", szIniPath);
+
+    WritePrivateProfileStringW(L"FTP", L"AutoUpload", g_ftpAutoUploadOnSave ? L"1" : L"0", szIniPath);
+
+    int pCount = (int)g_ftpProfiles.size();
+
+    if (pCount > MAX_FTP_PROFILES) pCount = MAX_FTP_PROFILES;
+
+    swprintf(buf, 32, L"%d", pCount);
+
+    WritePrivateProfileStringW(L"FTPProfiles", L"Count", buf, szIniPath);
+
+    for (int i = 0; i < pCount; i++) {
+
+        wchar_t key[32], pbuf[16];
+
+        swprintf(key, 32, L"P%d_Name", i); WritePrivateProfileStringW(L"FTPProfiles", key, g_ftpProfiles[i].name.c_str(), szIniPath);
+
+        swprintf(key, 32, L"P%d_Host", i); WritePrivateProfileStringW(L"FTPProfiles", key, g_ftpProfiles[i].host.c_str(), szIniPath);
+
+        swprintf(key, 32, L"P%d_Port", i); swprintf(pbuf, 16, L"%d", g_ftpProfiles[i].port); WritePrivateProfileStringW(L"FTPProfiles", key, pbuf, szIniPath);
+
+        swprintf(key, 32, L"P%d_User", i); WritePrivateProfileStringW(L"FTPProfiles", key, g_ftpProfiles[i].user.c_str(), szIniPath);
+
+        swprintf(key, 32, L"P%d_Pass", i); WritePrivateProfileStringW(L"FTPProfiles", key, g_ftpProfiles[i].pass.c_str(), szIniPath);
+
+        swprintf(key, 32, L"P%d_Dir", i);  WritePrivateProfileStringW(L"FTPProfiles", key, g_ftpProfiles[i].remoteDir.c_str(), szIniPath);
+
+        swprintf(key, 32, L"P%d_Pasv", i); WritePrivateProfileStringW(L"FTPProfiles", key, g_ftpProfiles[i].passive ? L"1" : L"0", szIniPath);
+
+    }
 
 
 
@@ -701,6 +1127,50 @@ void SaveConfig() {
 //  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И ТЕМНЫЙ ЗАГОЛОВОК ОКНА (DWM)
 
 // ============================================================
+
+static std::wstring Utf8ToWide(const char* s, int len = -1) {
+
+    if (!s) return L"";
+
+    int n = (len < 0) ? (int)strlen(s) : len;
+
+    if (n <= 0) return L"";
+
+    int wLen = MultiByteToWideChar(CP_UTF8, 0, s, n, NULL, 0);
+
+    if (wLen <= 0) return L"";
+
+    std::wstring res(wLen, 0);
+
+    MultiByteToWideChar(CP_UTF8, 0, s, n, &res[0], wLen);
+
+    return res;
+
+}
+
+
+
+static std::string WideToUtf8(const wchar_t* s, int len = -1) {
+
+    if (!s) return "";
+
+    int n = (len < 0) ? (int)wcslen(s) : len;
+
+    if (n <= 0) return "";
+
+    int uLen = WideCharToMultiByte(CP_UTF8, 0, s, n, NULL, 0, NULL, NULL);
+
+    if (uLen <= 0) return "";
+
+    std::string res(uLen, 0);
+
+    WideCharToMultiByte(CP_UTF8, 0, s, n, &res[0], uLen, NULL, NULL);
+
+    return res;
+
+}
+
+
 
 LRESULT SendEd(HWND hwnd, UINT Msg, WPARAM wParam = 0, LPARAM lParam = 0) {
 
@@ -792,6 +1262,12 @@ Lang GetLang(const std::wstring& path) {
 
     }
 
+    if (ext == L"cfg" || ext == L"ini" || ext == L"vdf" || ext == L"kv" || ext == L"json" || ext == L"bat" || ext == L"cmd") {
+
+        return LANG_CFG;
+
+    }
+
     return LANG_NONE;
 
 }
@@ -807,6 +1283,8 @@ const wchar_t* GetLangName(Lang l) {
     case LANG_PY:   return L"Python";
 
     case LANG_HTML: return L"HTML / Web";
+
+    case LANG_CFG:  return L"Config / KeyValues";
 
     default:        return L"Plain Text (.txt)";
 
@@ -1512,43 +1990,281 @@ static void LexHtml(const char* s, int n, std::vector<unsigned char>& st, int in
 
 
 
-void UpdateCodeFolding(HWND h, Lang lg) {
+static void LexCfg(const char* s, int n, std::vector<unsigned char>& st) {
 
-    if (lg != LANG_SP) return;
+    int i = 0;
 
-    int lines = (int)SendEd(h, SCI_GETLINECOUNT);
+    while (i < n) {
 
-    int level = SC_FOLDLEVELBASE;
+        unsigned char c = (unsigned char)s[i];
 
-    for (int line = 0; line < lines; line++) {
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
 
-        int start = (int)SendEd(h, SCI_POSITIONFROMLINE, line);
+            i++;
 
-        int end = (int)SendEd(h, SCI_GETLINEENDPOSITION, line);
-
-        int nextLevel = level;
-
-        for (int p = start; p < end; p++) {
-
-            int sty = (int)SendEd(h, SCI_GETSTYLEAT, p);
-
-            if (sty == S_COMMENT || sty == S_BLOCKCOMMENT || sty == S_STRING) continue;
-
-            int ch = (int)SendEd(h, SCI_GETCHARAT, p);
-
-            if (ch == '{') nextLevel++;
-
-            else if (ch == '}' && nextLevel > SC_FOLDLEVELBASE) nextLevel--;
+            continue;
 
         }
 
-        int flags = level;
+        if (c == '/' && i + 1 < n && s[i + 1] == '/') {
 
-        if (nextLevel > level) flags |= SC_FOLDLEVELHEADERFLAG;
+            int j = i;
 
-        SendEd(h, SCI_SETFOLDLEVEL, line, flags);
+            while (j < n && s[j] != '\n') j++;
 
-        level = nextLevel;
+            Fill(st, i, j, S_COMMENT);
+
+            i = j;
+
+            continue;
+
+        }
+
+        if (c == ';' || c == '#') {
+
+            int k = i - 1;
+
+            while (k >= 0 && (s[k] == ' ' || s[k] == '\t')) k--;
+
+            if (k < 0 || s[k] == '\n') {
+
+                int j = i;
+
+                while (j < n && s[j] != '\n') j++;
+
+                Fill(st, i, j, S_COMMENT);
+
+                i = j;
+
+                continue;
+
+            }
+
+        }
+
+        if (c == '[') {
+
+            int k = i - 1;
+
+            while (k >= 0 && (s[k] == ' ' || s[k] == '\t')) k--;
+
+            if (k < 0 || s[k] == '\n') {
+
+                int j = i + 1;
+
+                while (j < n && s[j] != ']' && s[j] != '\n') j++;
+
+                if (j < n && s[j] == ']') j++;
+
+                Fill(st, i, j, S_TAG);
+
+                i = j;
+
+                continue;
+
+            }
+
+        }
+
+        if (c == '"' || c == '\'') {
+
+            int j = i + 1;
+
+            while (j < n && s[j] != (char)c && s[j] != '\n') {
+
+                if (s[j] == '\\' && j + 1 < n && s[j + 1] != '\n') j++;
+
+                j++;
+
+            }
+
+            if (j < n && s[j] == (char)c) j++;
+
+            Fill(st, i, j, S_STRING);
+
+            i = j;
+
+            continue;
+
+        }
+
+        if (isdigit(c) || ((c == '-' || c == '.') && i + 1 < n && isdigit((unsigned char)s[i + 1]))) {
+
+            int j = i + 1;
+
+            while (j < n && (isalnum((unsigned char)s[j]) || s[j] == '.')) j++;
+
+            Fill(st, i, j, S_NUMBER);
+
+            i = j;
+
+            continue;
+
+        }
+
+        if (isalpha(c) || c == '_' || c == '$') {
+
+            int j = i + 1;
+
+            while (j < n && (isalnum((unsigned char)s[j]) || s[j] == '_' || s[j] == '-' || s[j] == '.')) j++;
+
+            std::string w(s + i, j - i);
+
+            std::string lw = w;
+
+            for (char& ch : lw) ch = (char)tolower((unsigned char)ch);
+
+            unsigned char sty = S_DEFAULT;
+
+            if (lw == "true" || lw == "false" || lw == "null" || lw == "yes" || lw == "no" || lw == "on" || lw == "off") {
+
+                sty = S_CONST;
+
+            }
+
+            else if (lw == "set" || lw == "echo" || lw == "if" || lw == "else" || lw == "goto" || lw == "call" || lw == "rem") {
+
+                sty = S_KEYWORD;
+
+            }
+
+            else {
+
+                int q = j;
+
+                while (q < n && (s[q] == ' ' || s[q] == '\t')) q++;
+
+                if (q < n && (s[q] == '=' || s[q] == ':')) sty = S_ATTR;
+
+            }
+
+            Fill(st, i, j, sty);
+
+            i = j;
+
+            continue;
+
+        }
+
+        if (c < 128 && ispunct(c)) {
+
+            st[i] = S_OPERATOR;
+
+        }
+
+        i++;
+
+    }
+
+}
+
+
+
+void UpdateCodeFolding(HWND h, Lang lg) {
+
+    int lines = (int)SendEd(h, SCI_GETLINECOUNT);
+
+    if (lg == LANG_SP || lg == LANG_CFG || lg == LANG_HTML) {
+
+        int level = SC_FOLDLEVELBASE;
+
+        for (int line = 0; line < lines; line++) {
+
+            int start = (int)SendEd(h, SCI_POSITIONFROMLINE, line);
+
+            int end = (int)SendEd(h, SCI_GETLINEENDPOSITION, line);
+
+            int nextLevel = level;
+
+            for (int p = start; p < end; p++) {
+
+                int sty = (int)SendEd(h, SCI_GETSTYLEAT, p);
+
+                if (sty == S_COMMENT || sty == S_BLOCKCOMMENT || sty == S_STRING || sty == S_HTMLCOMMENT) continue;
+
+                int ch = (int)SendEd(h, SCI_GETCHARAT, p);
+
+                if (ch == '{') nextLevel++;
+
+                else if (ch == '}' && nextLevel > SC_FOLDLEVELBASE) nextLevel--;
+
+            }
+
+            int flags = level;
+
+            if (nextLevel > level) flags |= SC_FOLDLEVELHEADERFLAG;
+
+            SendEd(h, SCI_SETFOLDLEVEL, line, flags);
+
+            level = nextLevel;
+
+        }
+
+    }
+
+    else if (lg == LANG_PY) {
+
+        int tw = (int)SendEd(h, SCI_GETTABWIDTH);
+
+        if (tw <= 0) tw = 4;
+
+        std::vector<int> indents(lines, -1);
+
+        for (int line = 0; line < lines; line++) {
+
+            int start = (int)SendEd(h, SCI_POSITIONFROMLINE, line);
+
+            int end = (int)SendEd(h, SCI_GETLINEENDPOSITION, line);
+
+            int indPos = (int)SendEd(h, SCI_GETLINEINDENTPOSITION, line);
+
+            if (indPos < end && SendEd(h, SCI_GETCHARAT, indPos) != '#') {
+
+                indents[line] = (int)SendEd(h, SCI_GETLINEINDENTATION, line) / tw;
+
+            }
+
+            (void)start;
+
+        }
+
+        int lastLevel = 0;
+
+        for (int line = 0; line < lines; line++) {
+
+            if (indents[line] < 0) {
+
+                SendEd(h, SCI_SETFOLDLEVEL, line, (SC_FOLDLEVELBASE + lastLevel) | SC_FOLDLEVELWHITEFLAG);
+
+                continue;
+
+            }
+
+            int cur = indents[line];
+
+            int next = cur;
+
+            for (int nl = line + 1; nl < lines; nl++) {
+
+                if (indents[nl] >= 0) {
+
+                    next = indents[nl];
+
+                    break;
+
+                }
+
+            }
+
+            int flags = SC_FOLDLEVELBASE + cur;
+
+            if (next > cur) flags |= SC_FOLDLEVELHEADERFLAG;
+
+            SendEd(h, SCI_SETFOLDLEVEL, line, flags);
+
+            lastLevel = cur;
+
+        }
 
     }
 
@@ -1638,6 +2354,12 @@ void StyleEditor(TabData& t, int reqPos) {
 
     }
 
+    else if (t.lang == LANG_CFG) {
+
+        LexCfg(buf.data(), n, st);
+
+    }
+
 
 
     SendEd(h, SCI_STARTSTYLING, start, 0);
@@ -1671,6 +2393,776 @@ void RelexTab(HWND h) {
     SendEd(h, SCI_STARTSTYLING, 0, 0);
 
     SendEd(h, SCI_COLOURISE, 0, -1);
+
+}
+
+
+
+// ============================================================
+
+//  СТРУКТУРА КОДА (OUTLINE SIDEBAR) И АВТОДОПОЛНЕНИЕ (INTELLISENSE)
+
+// ============================================================
+
+static std::string TrimCopy(const std::string& s) {
+
+    size_t a = 0;
+
+    while (a < s.size() && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r' || s[a] == '\n')) a++;
+
+    size_t b = s.size();
+
+    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r' || s[b - 1] == '\n')) b--;
+
+    return s.substr(a, b - a);
+
+}
+
+
+
+static std::string ExtractQuotedLiteral(const std::string& s, size_t startAt) {
+
+    size_t q1 = s.find('"', startAt);
+
+    if (q1 == std::string::npos) return "";
+
+    size_t q2 = s.find('"', q1 + 1);
+
+    if (q2 == std::string::npos || q2 <= q1 + 1) return "";
+
+    return s.substr(q1 + 1, q2 - q1 - 1);
+
+}
+
+
+
+void UpdateOutline(TabData& t) {
+
+    t.outline.clear();
+
+    HWND h = t.hwndEditor;
+
+    if (!h) return;
+
+    int len = (int)SendEd(h, SCI_GETLENGTH);
+
+    if (len <= 0 || len > 500000) return;
+
+
+
+    std::vector<char> buf((size_t)len + 1, 0);
+
+    SendEd(h, SCI_GETTEXT, (WPARAM)(len + 1), (LPARAM)buf.data());
+
+
+
+    std::vector<std::string> lines;
+
+    lines.reserve(256);
+
+    const char* p = buf.data();
+
+    const char* start = p;
+
+    while (*p) {
+
+        if (*p == '\n') {
+
+            lines.emplace_back(start, p - start);
+
+            start = p + 1;
+
+        }
+
+        p++;
+
+    }
+
+    if (p > start) lines.emplace_back(start, p - start);
+
+
+
+    if (t.lang == LANG_SP) {
+
+        static const std::unordered_set<std::string> skipCalls = {
+
+            "if", "else", "for", "while", "switch", "return", "sizeof", "view_as", "defined"
+
+        };
+
+        int braceDepth = 0;
+
+        bool inBlockComment = false;
+
+        for (int ln = 0; ln < (int)lines.size(); ln++) {
+
+            std::string raw = lines[ln];
+
+            std::string clean;
+
+            clean.reserve(raw.size());
+
+            bool inStr = false;
+
+            char strCh = 0;
+
+            int lineStartDepth = braceDepth;
+
+
+
+            for (size_t i = 0; i < raw.size(); i++) {
+
+                char c = raw[i];
+
+                if (inBlockComment) {
+
+                    if (c == '*' && i + 1 < raw.size() && raw[i + 1] == '/') {
+
+                        inBlockComment = false;
+
+                        i++;
+
+                    }
+
+                    continue;
+
+                }
+
+                if (inStr) {
+
+                    clean.push_back(c);
+
+                    if (c == '\\' && i + 1 < raw.size()) {
+
+                        clean.push_back(raw[++i]);
+
+                    }
+
+                    else if (c == strCh) {
+
+                        inStr = false;
+
+                    }
+
+                    continue;
+
+                }
+
+                if (c == '/' && i + 1 < raw.size() && raw[i + 1] == '/') break;
+
+                if (c == '/' && i + 1 < raw.size() && raw[i + 1] == '*') {
+
+                    inBlockComment = true;
+
+                    i++;
+
+                    continue;
+
+                }
+
+                if (c == '"' || c == '\'') {
+
+                    inStr = true;
+
+                    strCh = c;
+
+                    clean.push_back(c);
+
+                    continue;
+
+                }
+
+                if (c == '{') braceDepth++;
+
+                else if (c == '}' && braceDepth > 0) braceDepth--;
+
+                clean.push_back(c);
+
+            }
+
+
+
+            std::string tr = TrimCopy(clean);
+
+            if (tr.empty()) continue;
+
+
+
+            if (tr.rfind("#define ", 0) == 0 || tr.rfind("#define\t", 0) == 0) {
+
+                size_t k = 7;
+
+                while (k < tr.size() && (tr[k] == ' ' || tr[k] == '\t')) k++;
+
+                size_t e = k;
+
+                while (e < tr.size() && (isalnum((unsigned char)tr[e]) || tr[e] == '_')) e++;
+
+                if (e > k) {
+
+                    t.outline.push_back({ L"# " + Utf8ToWide(tr.substr(k, e - k).c_str()), ln, 2, {0,0,0,0} });
+
+                }
+
+                continue;
+
+            }
+
+
+
+            auto checkTypeDecl = [&](const char* kw) -> bool {
+
+                size_t kl = strlen(kw);
+
+                if (tr.rfind(kw, 0) == 0 && tr.size() > kl && (tr[kl] == ' ' || tr[kl] == '\t')) {
+
+                    size_t k = kl;
+
+                    while (k < tr.size() && (tr[k] == ' ' || tr[k] == '\t')) k++;
+
+                    size_t e = k;
+
+                    while (e < tr.size() && (isalnum((unsigned char)tr[e]) || tr[e] == '_')) e++;
+
+                    if (e > k) {
+
+                        t.outline.push_back({ Utf8ToWide((std::string(kw) + " " + tr.substr(k, e - k)).c_str()), ln, 2, {0,0,0,0} });
+
+                        return true;
+
+                    }
+
+                }
+
+                return false;
+
+            };
+
+            if (lineStartDepth == 0 && (checkTypeDecl("enum") || checkTypeDecl("struct") || checkTypeDecl("methodmap") || checkTypeDecl("class"))) {
+
+                continue;
+
+            }
+
+
+
+            size_t pCmd = tr.find("RegConsoleCmd");
+
+            if (pCmd == std::string::npos) pCmd = tr.find("RegAdminCmd");
+
+            if (pCmd != std::string::npos) {
+
+                std::string arg = ExtractQuotedLiteral(tr, pCmd);
+
+                if (!arg.empty()) {
+
+                    t.outline.push_back({ L"cmd: " + Utf8ToWide(arg.c_str()), ln, 1, {0,0,0,0} });
+
+                }
+
+            }
+
+            size_t pEv = tr.find("HookEvent");
+
+            if (pEv != std::string::npos) {
+
+                std::string arg = ExtractQuotedLiteral(tr, pEv);
+
+                if (!arg.empty()) {
+
+                    t.outline.push_back({ L"ev: " + Utf8ToWide(arg.c_str()), ln, 1, {0,0,0,0} });
+
+                }
+
+            }
+
+            size_t pCv = tr.find("CreateConVar");
+
+            if (pCv != std::string::npos) {
+
+                std::string arg = ExtractQuotedLiteral(tr, pCv);
+
+                if (!arg.empty()) {
+
+                    t.outline.push_back({ L"cvar: " + Utf8ToWide(arg.c_str()), ln, 1, {0,0,0,0} });
+
+                }
+
+            }
+
+
+
+            if (lineStartDepth == 0 && tr[0] != '#') {
+
+                bool isNativeOrFwd = (tr.rfind("native ", 0) == 0 || tr.rfind("forward ", 0) == 0);
+
+                bool endsSemi = (!tr.empty() && tr.back() == ';');
+
+                if (!endsSemi || isNativeOrFwd) {
+
+                    size_t lp = tr.find('(');
+
+                    if (lp != std::string::npos && lp > 0 && tr.find('=') == std::string::npos) {
+
+                        size_t e = lp;
+
+                        while (e > 0 && (tr[e - 1] == ' ' || tr[e - 1] == '\t')) e--;
+
+                        size_t k = e;
+
+                        while (k > 0 && (isalnum((unsigned char)tr[k - 1]) || tr[k - 1] == '_' || tr[k - 1] == ':')) k--;
+
+                        if (e > k) {
+
+                            std::string fn = tr.substr(k, e - k);
+
+                            if (!skipCalls.count(fn)) {
+
+                                t.outline.push_back({ Utf8ToWide((fn + "()").c_str()), ln, 0, {0,0,0,0} });
+
+                            }
+
+                        }
+
+                    }
+
+                }
+
+            }
+
+        }
+
+    }
+
+    else if (t.lang == LANG_PY) {
+
+        for (int ln = 0; ln < (int)lines.size(); ln++) {
+
+            std::string tr = TrimCopy(lines[ln]);
+
+            if (tr.rfind("async def ", 0) == 0 || tr.rfind("def ", 0) == 0) {
+
+                size_t k = (tr[0] == 'a') ? 10 : 4;
+
+                while (k < tr.size() && tr[k] == ' ') k++;
+
+                size_t e = k;
+
+                while (e < tr.size() && (isalnum((unsigned char)tr[e]) || tr[e] == '_')) e++;
+
+                if (e > k) {
+
+                    t.outline.push_back({ Utf8ToWide((tr.substr(k, e - k) + "()").c_str()), ln, 0, {0,0,0,0} });
+
+                }
+
+            }
+
+            else if (tr.rfind("class ", 0) == 0) {
+
+                size_t k = 6;
+
+                while (k < tr.size() && tr[k] == ' ') k++;
+
+                size_t e = k;
+
+                while (e < tr.size() && (isalnum((unsigned char)tr[e]) || tr[e] == '_')) e++;
+
+                if (e > k) {
+
+                    t.outline.push_back({ L"class " + Utf8ToWide(tr.substr(k, e - k).c_str()), ln, 2, {0,0,0,0} });
+
+                }
+
+            }
+
+        }
+
+    }
+
+    else if (t.lang == LANG_HTML) {
+
+        static const char* tags[] = { "<head", "<body", "<header", "<nav", "<main", "<section", "<footer", "<form", "<script", "<style" };
+
+        for (int ln = 0; ln < (int)lines.size(); ln++) {
+
+            std::string tr = TrimCopy(lines[ln]);
+
+            std::string low = tr;
+
+            for (char& ch : low) ch = (char)tolower((unsigned char)ch);
+
+            for (auto tg : tags) {
+
+                size_t tl = strlen(tg);
+
+                if (low.rfind(tg, 0) == 0 && (low.size() == tl || low[tl] == '>' || low[tl] == ' ')) {
+
+                    t.outline.push_back({ Utf8ToWide((std::string(tg) + ">").c_str()), ln, 3, {0,0,0,0} });
+
+                    break;
+
+                }
+
+            }
+
+            size_t pid = low.find("id=\"");
+
+            if (pid != std::string::npos) {
+
+                std::string idv = ExtractQuotedLiteral(tr, pid + 3);
+
+                if (!idv.empty()) {
+
+                    t.outline.push_back({ L"#" + Utf8ToWide(idv.c_str()), ln, 2, {0,0,0,0} });
+
+                }
+
+            }
+
+        }
+
+    }
+
+    else if (t.lang == LANG_CFG) {
+
+        int depth = 0;
+
+        for (int ln = 0; ln < (int)lines.size(); ln++) {
+
+            std::string tr = TrimCopy(lines[ln]);
+
+            if (tr.empty() || tr.rfind("//", 0) == 0 || tr[0] == ';' || tr[0] == '#') continue;
+
+            if (tr[0] == '[' && tr.back() == ']' && tr.size() > 2) {
+
+                t.outline.push_back({ Utf8ToWide(tr.c_str()), ln, 3, {0,0,0,0} });
+
+                continue;
+
+            }
+
+            if (depth <= 1 && tr[0] == '"') {
+
+                std::string key = ExtractQuotedLiteral(tr, 0);
+
+                if (!key.empty()) {
+
+                    bool isBlock = (tr.find('{') != std::string::npos);
+
+                    if (!isBlock && ln + 1 < (int)lines.size()) {
+
+                        std::string nxt = TrimCopy(lines[ln + 1]);
+
+                        if (!nxt.empty() && nxt[0] == '{') isBlock = true;
+
+                    }
+
+                    if (isBlock) {
+
+                        t.outline.push_back({ Utf8ToWide(key.c_str()), ln, 3, {0,0,0,0} });
+
+                    }
+
+                }
+
+            }
+
+            for (char c : tr) {
+
+                if (c == '{') depth++;
+
+                else if (c == '}' && depth > 0) depth--;
+
+            }
+
+        }
+
+    }
+
+}
+
+
+
+void TriggerAutoComplete(TabData& t, bool force) {
+
+    HWND h = t.hwndEditor;
+
+    if (!h) return;
+
+    int pos = (int)SendEd(h, SCI_GETCURRENTPOS);
+
+    if (!force && pos > 0) {
+
+        int sty = (int)SendEd(h, SCI_GETSTYLEAT, pos - 1);
+
+        if (sty == S_COMMENT || sty == S_BLOCKCOMMENT || sty == S_HTMLCOMMENT || sty == S_STRING || sty == S_TRIPLE) {
+
+            return;
+
+        }
+
+    }
+
+
+
+    int wordStart = (int)SendEd(h, SCI_WORDSTARTPOSITION, pos, TRUE);
+
+    int prefixLen = pos - wordStart;
+
+    if (!force && prefixLen < 2) {
+
+        if (SendEd(h, SCI_AUTOCACTIVE)) SendEd(h, SCI_AUTOCCANCEL);
+
+        return;
+
+    }
+
+
+
+    std::string prefix;
+
+    if (prefixLen > 0) {
+
+        prefix.resize((size_t)prefixLen + 1, 0);
+
+        Sci_TextRange tr;
+
+        tr.chrg.cpMin = wordStart;
+
+        tr.chrg.cpMax = pos;
+
+        tr.lpstrText = &prefix[0];
+
+        SendEd(h, SCI_GETTEXTRANGE, 0, (LPARAM)&tr);
+
+        prefix.resize((size_t)prefixLen);
+
+    }
+
+
+
+    static const char* spApi[] = {
+
+        "OnPluginStart", "OnPluginEnd", "OnMapStart", "OnMapEnd",
+
+        "OnClientPutInServer", "OnClientPostAdminCheck", "OnClientConnected",
+
+        "OnClientAuthorized", "OnClientDisconnect", "OnPlayerRunCmd", "OnTakeDamage",
+
+        "RegConsoleCmd", "RegAdminCmd", "AddCommandListener", "ReplyToCommand",
+
+        "GetCmdArg", "GetCmdArgInt", "GetCmdArgs",
+
+        "HookEvent", "HookEventEx", "UnhookEvent",
+
+        "CreateConVar", "FindConVar", "AutoExecConfig",
+
+        "CreateTimer", "KillTimer", "TriggerTimer",
+
+        "PrintToChat", "PrintToChatAll", "CPrintToChat", "CPrintToChatAll",
+
+        "PrintToServer", "PrintToConsole", "PrintHintText", "PrintCenterText",
+
+        "Format", "FormatEx", "StrEqual", "StrContains", "strcopy",
+
+        "IntToString", "StringToInt", "StringToFloat", "FloatToString",
+
+        "IsClientInGame", "IsClientConnected", "IsPlayerAlive", "IsFakeClient",
+
+        "GetClientName", "GetClientAuthId", "GetClientIP", "GetClientTeam",
+
+        "GetClientHealth", "SetEntityHealth", "GetClientOfUserId", "GetClientUserId",
+
+        "GetUserFlagBits", "CheckCommandAccess", "GetClientAbsOrigin", "TeleportEntity",
+
+        "CreateEntityByName", "DispatchSpawn", "AcceptEntityInput",
+
+        "GetEntProp", "SetEntProp", "GetEntPropFloat", "SetEntPropFloat",
+
+        "GetEntPropString", "SetEntPropString", "GetEdictClassname",
+
+        "IsValidEntity", "IsValidEdict",
+
+        "EmitSoundToClient", "EmitSoundToAll", "PrecacheSound", "PrecacheModel",
+
+        "BuildPath", "OpenFile", "ReadFileLine", "WriteFileLine", "FileExists",
+
+        "SQL_TConnect", "SQL_FormatQuery",
+
+        "RegClientCookie", "SetClientCookie", "GetClientCookie", "AreClientCookiesCached",
+
+        "GetEngineTime", "GetGameTime", "GetTime", "FormatTime",
+
+        "SetHudTextParams", "ShowHudText", "ShowSyncHudText", "CreateHudSynchronizer",
+
+        "MaxClients", "MAXPLAYERS", "MAX_NAME_LENGTH", "PLATFORM_MAX_PATH",
+
+        "Plugin_Continue", "Plugin_Handled", "Plugin_Stop", "Plugin_Changed",
+
+        "INVALID_HANDLE", "TIMER_REPEAT", "TIMER_FLAG_NO_MAPCHANGE",
+
+        "FCVAR_NOTIFY", "ADMFLAG_GENERIC", "ADMFLAG_ROOT", "ADMFLAG_BAN",
+
+        "Menu", "Panel", "ArrayList", "StringMap", "DataPack", "KeyValues",
+
+        "Database", "DBResultSet", "Event", "ConVar", "Handle", "Action", "Cookie",
+
+        "TopMenu", "SMCParser", "public", "stock", "native", "forward",
+
+        "methodmap", "property", "typedef", "typeset", "view_as", "sizeof",
+
+        "newdecls", "semicolon", "sourcemod", "sdktools", "sdkhooks", "morecolors"
+
+    };
+
+    static const char* pyApi[] = {
+
+        "def", "class", "import", "from", "return", "async", "await", "lambda",
+
+        "print", "len", "range", "enumerate", "zip", "isinstance", "open",
+
+        "str", "int", "float", "list", "dict", "set", "tuple", "bool",
+
+        "True", "False", "None", "__name__", "__main__", "Exception", "ValueError"
+
+    };
+
+    static const char* htmlApi[] = {
+
+        "div", "span", "section", "header", "footer", "main", "nav", "article",
+
+        "button", "input", "form", "label", "select", "option", "textarea",
+
+        "script", "style", "link", "meta", "title", "class", "href", "src",
+
+        "function", "const", "let", "document", "querySelector", "addEventListener",
+
+        "console.log", "display", "flex", "grid", "background", "border-radius"
+
+    };
+
+
+
+    std::set<std::string> candidates;
+
+    if (t.lang == LANG_SP) {
+
+        for (auto s : spApi) candidates.insert(s);
+
+    }
+
+    else if (t.lang == LANG_PY) {
+
+        for (auto s : pyApi) candidates.insert(s);
+
+    }
+
+    else if (t.lang == LANG_HTML) {
+
+        for (auto s : htmlApi) candidates.insert(s);
+
+    }
+
+
+
+    int docLen = (int)SendEd(h, SCI_GETLENGTH);
+
+    if (docLen > 0 && docLen < 300000) {
+
+        std::vector<char> doc((size_t)docLen + 1, 0);
+
+        SendEd(h, SCI_GETTEXT, (WPARAM)(docLen + 1), (LPARAM)doc.data());
+
+        int idx = 0;
+
+        while (idx < docLen) {
+
+            unsigned char c = (unsigned char)doc[idx];
+
+            if (isalpha(c) || c == '_') {
+
+                int s = idx;
+
+                idx++;
+
+                while (idx < docLen && (isalnum((unsigned char)doc[idx]) || doc[idx] == '_')) idx++;
+
+                if (idx - s >= 3 && s != wordStart) {
+
+                    candidates.emplace(doc.data() + s, idx - s);
+
+                }
+
+            }
+
+            else {
+
+                idx++;
+
+            }
+
+        }
+
+    }
+
+
+
+    std::vector<std::string> matches;
+
+    for (const auto& cand : candidates) {
+
+        if (prefixLen == 0 || _strnicmp(cand.c_str(), prefix.c_str(), (size_t)prefixLen) == 0) {
+
+            if (!force && (int)cand.size() == prefixLen && _stricmp(cand.c_str(), prefix.c_str()) == 0) {
+
+                continue;
+
+            }
+
+            matches.push_back(cand);
+
+        }
+
+    }
+
+
+
+    if (matches.empty()) {
+
+        if (SendEd(h, SCI_AUTOCACTIVE)) SendEd(h, SCI_AUTOCCANCEL);
+
+        return;
+
+    }
+
+
+
+    std::sort(matches.begin(), matches.end(), [](const std::string& a, const std::string& b) {
+
+        int cmp = _stricmp(a.c_str(), b.c_str());
+
+        return (cmp != 0) ? (cmp < 0) : (a < b);
+
+        });
+
+
+
+    std::string joined;
+
+    size_t limit = matches.size();
+
+    if (limit > 80) limit = 80;
+
+    for (size_t i = 0; i < limit; i++) {
+
+        if (i > 0) joined += ' ';
+
+        joined += matches[i];
+
+    }
+
+    SendEd(h, SCI_AUTOCSHOW, prefixLen, (LPARAM)joined.c_str());
 
 }
 
@@ -1780,9 +3272,77 @@ void HandleCharAdded(TabData& t, int ch) {
 
         SendEd(h, SCI_GOTOPOS, SendEd(h, SCI_GETLINEINDENTPOSITION, line));
 
+        return;
+
     }
 
-    else if (ch == '}') {
+
+
+    int nextCh = (int)SendEd(h, SCI_GETCHARAT, pos);
+
+    if ((ch == ')' || ch == ']' || ch == '}') && nextCh == ch) {
+
+        SendEd(h, SCI_DELETERANGE, pos - 1, 1);
+
+        SendEd(h, SCI_GOTOPOS, pos);
+
+        return;
+
+    }
+
+
+
+    if (ch == '"') {
+
+        int lineStart = (int)SendEd(h, SCI_POSITIONFROMLINE, line);
+
+        int quotesBefore = 0;
+
+        for (int p = lineStart; p < pos - 1; p++) {
+
+            int c = (int)SendEd(h, SCI_GETCHARAT, p);
+
+            if (c == '\\') {
+
+                p++;
+
+                continue;
+
+            }
+
+            if (c == '"') quotesBefore++;
+
+        }
+
+        if ((quotesBefore % 2 == 1) && nextCh == '"') {
+
+            SendEd(h, SCI_DELETERANGE, pos - 1, 1);
+
+            SendEd(h, SCI_GOTOPOS, pos);
+
+            return;
+
+        }
+
+        int sty = (pos > 1) ? (int)SendEd(h, SCI_GETSTYLEAT, pos - 2) : S_DEFAULT;
+
+        if ((quotesBefore % 2 == 0) &&
+
+            sty != S_COMMENT && sty != S_BLOCKCOMMENT && sty != S_HTMLCOMMENT &&
+
+            (nextCh == 0 || nextCh == ' ' || nextCh == '\t' || nextCh == '\r' || nextCh == '\n' || nextCh == ')' || nextCh == ']' || nextCh == '}' || nextCh == ';' || nextCh == ',')) {
+
+            SendEd(h, SCI_INSERTTEXT, pos, (LPARAM)"\"");
+
+        }
+
+        return;
+
+    }
+
+
+
+    if (ch == '}') {
 
         int ip = (int)SendEd(h, SCI_GETLINEINDENTPOSITION, line);
 
@@ -1806,15 +3366,19 @@ void HandleCharAdded(TabData& t, int ch) {
 
     else if (ch == '(' || ch == '[' || ch == '{') {
 
-        int nextCh = (int)SendEd(h, SCI_GETCHARAT, pos);
-
-        if (nextCh == 0 || nextCh == ' ' || nextCh == '\r' || nextCh == '\n' || nextCh == ')' || nextCh == ']' || nextCh == ';') {
+        if (nextCh == 0 || nextCh == ' ' || nextCh == '\t' || nextCh == '\r' || nextCh == '\n' || nextCh == ')' || nextCh == ']' || nextCh == '}' || nextCh == ';' || nextCh == ',') {
 
             const char* closeStr = (ch == '(') ? ")" : (ch == '[') ? "]" : "}";
 
             SendEd(h, SCI_INSERTTEXT, pos, (LPARAM)closeStr);
 
         }
+
+    }
+
+    else if ((ch >= 0 && ch < 128 && isalnum(ch)) || ch == '_') {
+
+        TriggerAutoComplete(t, false);
 
     }
 
@@ -1866,9 +3430,9 @@ void InsertSourcePawnTemplate() {
 
         "    name        = \"New Plugin\",\n"
 
-        "    author      = \"ANR1S\",\n"
+        "    author      = \"Athor\",\n"
 
-        "    description = \"Created in Kova Code Studio v1.0.0\",\n"
+        "    description = \"Created plugin in Kova Code Studio\",\n"
 
         "    version     = PLUGIN_VERSION,\n"
 
@@ -1892,6 +3456,8 @@ void InsertSourcePawnTemplate() {
 
     RelexTab(tabs[currentTab].hwndEditor);
 
+    UpdateOutline(tabs[currentTab]);
+
     InvalidateRect(hwndMain, NULL, FALSE);
 
     LogToConsoleW(L"> Вставлен шаблон плагина SourcePawn (ANR1S).", LOG_ACCENT);
@@ -1905,6 +3471,190 @@ void DuplicateCurrentLine() {
     if (currentTab < 0) return;
 
     SendActive(SCI_LINEDUPLICATE);
+
+}
+
+
+
+void HighlightWordOccurrences(HWND h) {
+
+    if (!h) return;
+
+    int docLen = (int)SendEd(h, SCI_GETLENGTH);
+
+    SendEd(h, SCI_SETINDICATORCURRENT, INDIC_WORD_HIGHLIGHT);
+
+    SendEd(h, SCI_INDICATORCLEARRANGE, 0, docLen);
+
+    if (docLen <= 0 || docLen > 150000) return;
+
+
+
+    int selS = (int)SendEd(h, SCI_GETSELECTIONSTART);
+
+    int selE = (int)SendEd(h, SCI_GETSELECTIONEND);
+
+    int wStart = selS, wEnd = selE;
+
+    if (selS == selE) {
+
+        wStart = (int)SendEd(h, SCI_WORDSTARTPOSITION, selS, TRUE);
+
+        wEnd = (int)SendEd(h, SCI_WORDENDPOSITION, selS, TRUE);
+
+    }
+
+    int wLen = wEnd - wStart;
+
+    if (wLen < 2 || wLen > 64) return;
+
+
+
+    std::vector<char> word((size_t)wLen + 1, 0);
+
+    Sci_TextRange tr;
+
+    tr.chrg.cpMin = wStart;
+
+    tr.chrg.cpMax = wEnd;
+
+    tr.lpstrText = word.data();
+
+    SendEd(h, SCI_GETTEXTRANGE, 0, (LPARAM)&tr);
+
+    for (int i = 0; i < wLen; i++) {
+
+        unsigned char c = (unsigned char)word[i];
+
+        if (!(isalnum(c) || c == '_')) return;
+
+    }
+
+
+
+    int flags = SCFIND_WHOLEWORD | SCFIND_MATCHCASE;
+
+    int pos = 0;
+
+    int count = 0;
+
+    while (pos < docLen && count < 300) {
+
+        Sci_TextToFind ttf;
+
+        ttf.chrg.cpMin = pos;
+
+        ttf.chrg.cpMax = docLen;
+
+        ttf.lpstrText = word.data();
+
+        int found = (int)SendEd(h, SCI_FINDTEXT, flags, (LPARAM)&ttf);
+
+        if (found < 0) break;
+
+        SendEd(h, SCI_INDICATORFILLRANGE, found, wLen);
+
+        pos = (int)ttf.chrgText.cpMax;
+
+        count++;
+
+    }
+
+}
+
+
+
+void SelectAllWordOccurrences() {
+
+    if (currentTab < 0) return;
+
+    HWND h = tabs[currentTab].hwndEditor;
+
+    int docLen = (int)SendEd(h, SCI_GETLENGTH);
+
+    if (docLen <= 0) return;
+
+
+
+    int selS = (int)SendEd(h, SCI_GETSELECTIONSTART);
+
+    int selE = (int)SendEd(h, SCI_GETSELECTIONEND);
+
+    if (selS == selE) {
+
+        selS = (int)SendEd(h, SCI_WORDSTARTPOSITION, selS, TRUE);
+
+        selE = (int)SendEd(h, SCI_WORDENDPOSITION, selE, TRUE);
+
+    }
+
+    int wLen = selE - selS;
+
+    if (wLen <= 0 || wLen > 128) return;
+
+
+
+    std::vector<char> word((size_t)wLen + 1, 0);
+
+    Sci_TextRange tr;
+
+    tr.chrg.cpMin = selS;
+
+    tr.chrg.cpMax = selE;
+
+    tr.lpstrText = word.data();
+
+    SendEd(h, SCI_GETTEXTRANGE, 0, (LPARAM)&tr);
+
+
+
+    int pos = 0;
+
+    int count = 0;
+
+    while (pos < docLen && count < 200) {
+
+        Sci_TextToFind ttf;
+
+        ttf.chrg.cpMin = pos;
+
+        ttf.chrg.cpMax = docLen;
+
+        ttf.lpstrText = word.data();
+
+        int found = (int)SendEd(h, SCI_FINDTEXT, SCFIND_MATCHCASE, (LPARAM)&ttf);
+
+        if (found < 0) break;
+
+        if (count == 0) SendEd(h, SCI_SETSELECTION, ttf.chrgText.cpMax, ttf.chrgText.cpMin);
+
+        else SendEd(h, SCI_ADDSELECTION, ttf.chrgText.cpMax, ttf.chrgText.cpMin);
+
+        pos = (int)ttf.chrgText.cpMax;
+
+        count++;
+
+    }
+
+    if (count > 0) {
+
+        wchar_t msg[128];
+
+        swprintf(msg, 128, L"> Мультикурсор: выделено вхождений: %d.", count);
+
+        LogToConsoleW(msg, LOG_ACCENT);
+
+    }
+
+}
+
+
+
+void FoldAllCode(bool fold) {
+
+    if (currentTab < 0) return;
+
+    SendActive(SCI_FOLDALL, fold ? SC_FOLDACTION_CONTRACT : SC_FOLDACTION_EXPAND, 0);
 
 }
 
@@ -1936,51 +3686,311 @@ void ToggleLineComment() {
 
     HWND h = tabs[currentTab].hwndEditor;
 
-    int pos = (int)SendEd(h, SCI_GETCURRENTPOS);
+    int selStart = (int)SendEd(h, SCI_GETSELECTIONSTART);
 
-    int line = (int)SendEd(h, SCI_LINEFROMPOSITION, pos);
+    int selEnd = (int)SendEd(h, SCI_GETSELECTIONEND);
 
-    int indentPos = (int)SendEd(h, SCI_GETLINEINDENTPOSITION, line);
+    int lineStart = (int)SendEd(h, SCI_LINEFROMPOSITION, selStart);
 
-    int c1 = (int)SendEd(h, SCI_GETCHARAT, indentPos);
+    int lineEnd = (int)SendEd(h, SCI_LINEFROMPOSITION, selEnd);
 
-    int c2 = (int)SendEd(h, SCI_GETCHARAT, indentPos + 1);
+    if (selEnd > selStart && lineEnd > lineStart && SendEd(h, SCI_POSITIONFROMLINE, lineEnd) == selEnd) {
+
+        lineEnd--;
+
+    }
 
 
 
-    if (tabs[currentTab].lang == LANG_PY) {
+    bool isHash = (tabs[currentTab].lang == LANG_PY);
 
-        if (c1 == '#') {
+    const char* prefix = isHash ? "# " : "// ";
 
-            SendEd(h, SCI_DELETERANGE, indentPos, (c2 == ' ') ? 2 : 1);
+    int prefixLen = isHash ? 1 : 2;
+
+
+
+    bool allCommented = true;
+
+    bool anyNonEmpty = false;
+
+    for (int ln = lineStart; ln <= lineEnd; ln++) {
+
+        int ls = (int)SendEd(h, SCI_POSITIONFROMLINE, ln);
+
+        int le = (int)SendEd(h, SCI_GETLINEENDPOSITION, ln);
+
+        int ip = (int)SendEd(h, SCI_GETLINEINDENTPOSITION, ln);
+
+        if (ip >= le && lineStart != lineEnd) continue;
+
+        anyNonEmpty = true;
+
+        int c1 = (int)SendEd(h, SCI_GETCHARAT, ip);
+
+        int c2 = (int)SendEd(h, SCI_GETCHARAT, ip + 1);
+
+        if (isHash) {
+
+            if (c1 != '#') { allCommented = false; break; }
 
         }
 
         else {
 
-            SendEd(h, SCI_INSERTTEXT, indentPos, (LPARAM)"# ");
+            if (!(c1 == '/' && c2 == '/')) { allCommented = false; break; }
 
         }
 
+        (void)ls;
+
     }
 
-    else {
+    if (!anyNonEmpty) allCommented = false;
 
-        if (c1 == '/' && c2 == '/') {
 
-            int c3 = (int)SendEd(h, SCI_GETCHARAT, indentPos + 2);
 
-            SendEd(h, SCI_DELETERANGE, indentPos, (c3 == ' ') ? 3 : 2);
+    SendEd(h, SCI_BEGINUNDOACTION);
+
+    for (int ln = lineStart; ln <= lineEnd; ln++) {
+
+        int le = (int)SendEd(h, SCI_GETLINEENDPOSITION, ln);
+
+        int ip = (int)SendEd(h, SCI_GETLINEINDENTPOSITION, ln);
+
+        if (ip >= le && lineStart != lineEnd) continue;
+
+        if (allCommented) {
+
+            int nextC = (int)SendEd(h, SCI_GETCHARAT, ip + prefixLen);
+
+            int delLen = (nextC == ' ') ? (prefixLen + 1) : prefixLen;
+
+            SendEd(h, SCI_DELETERANGE, ip, delLen);
 
         }
 
         else {
 
-            SendEd(h, SCI_INSERTTEXT, indentPos, (LPARAM)"// ");
+            SendEd(h, SCI_INSERTTEXT, ip, (LPARAM)prefix);
 
         }
 
     }
+
+    SendEd(h, SCI_ENDUNDOACTION);
+
+}
+
+
+
+void FormatActiveCode() {
+
+    if (currentTab < 0) return;
+
+    HWND h = tabs[currentTab].hwndEditor;
+
+    int len = (int)SendEd(h, SCI_GETLENGTH);
+
+    if (len <= 0) return;
+
+
+
+    std::vector<char> buf((size_t)len + 1, 0);
+
+    SendEd(h, SCI_GETTEXT, (WPARAM)(len + 1), (LPARAM)buf.data());
+
+
+
+    std::vector<std::string> rawLines;
+
+    const char* p = buf.data();
+
+    const char* s = p;
+
+    bool usesCRLF = false;
+
+    while (*p) {
+
+        if (*p == '\n') {
+
+            size_t lineLen = (size_t)(p - s);
+
+            if (lineLen > 0 && s[lineLen - 1] == '\r') {
+
+                usesCRLF = true;
+
+                lineLen--;
+
+            }
+
+            rawLines.emplace_back(s, lineLen);
+
+            s = p + 1;
+
+        }
+
+        p++;
+
+    }
+
+    if (p > s) rawLines.emplace_back(s, (size_t)(p - s));
+
+
+
+    Lang lg = tabs[currentTab].lang;
+
+    bool braceLang = (lg == LANG_SP || lg == LANG_CFG);
+
+    int depth = 0;
+
+    int tw = (int)SendEd(h, SCI_GETTABWIDTH);
+
+    if (tw <= 0) tw = 4;
+
+    bool inBlockComment = false;
+
+
+
+    std::string out;
+
+    out.reserve((size_t)len + 256);
+
+    const char* eol = usesCRLF ? "\r\n" : "\n";
+
+
+
+    for (size_t li = 0; li < rawLines.size(); li++) {
+
+        std::string line = rawLines[li];
+
+        while (!line.empty() && (line.back() == ' ' || line.back() == '\t')) line.pop_back();
+
+
+
+        if (braceLang) {
+
+            std::string trimmed = TrimCopy(line);
+
+            if (trimmed.empty()) {
+
+                if (li + 1 < rawLines.size()) out += eol;
+
+                continue;
+
+            }
+
+            int lineDepth = depth;
+
+            if (!inBlockComment && trimmed[0] == '}' && lineDepth > 0) {
+
+                lineDepth--;
+
+            }
+
+            if (trimmed[0] != '#') {
+
+                out.append((size_t)(lineDepth * tw), ' ');
+
+                out += trimmed;
+
+            }
+
+            else {
+
+                out += trimmed;
+
+            }
+
+
+
+            bool inStr = false;
+
+            char strCh = 0;
+
+            for (size_t i = 0; i < trimmed.size(); i++) {
+
+                char c = trimmed[i];
+
+                if (inBlockComment) {
+
+                    if (c == '*' && i + 1 < trimmed.size() && trimmed[i + 1] == '/') {
+
+                        inBlockComment = false;
+
+                        i++;
+
+                    }
+
+                    continue;
+
+                }
+
+                if (inStr) {
+
+                    if (c == '\\' && i + 1 < trimmed.size()) { i++; continue; }
+
+                    if (c == strCh) inStr = false;
+
+                    continue;
+
+                }
+
+                if (c == '/' && i + 1 < trimmed.size() && trimmed[i + 1] == '/') break;
+
+                if (c == '/' && i + 1 < trimmed.size() && trimmed[i + 1] == '*') {
+
+                    inBlockComment = true;
+
+                    i++;
+
+                    continue;
+
+                }
+
+                if (c == '"' || c == '\'') { inStr = true; strCh = c; continue; }
+
+                if (c == '{') depth++;
+
+                else if (c == '}' && depth > 0) depth--;
+
+            }
+
+        }
+
+        else {
+
+            out += line;
+
+        }
+
+        if (li + 1 < rawLines.size()) out += eol;
+
+    }
+
+
+
+    int curLine = (int)SendEd(h, SCI_LINEFROMPOSITION, SendEd(h, SCI_GETCURRENTPOS));
+
+    SendEd(h, SCI_BEGINUNDOACTION);
+
+    SendEd(h, SCI_SETTEXT, 0, (LPARAM)out.c_str());
+
+    SendEd(h, SCI_ENDUNDOACTION);
+
+    int maxLines = (int)SendEd(h, SCI_GETLINECOUNT);
+
+    if (curLine >= maxLines) curLine = maxLines - 1;
+
+    if (curLine >= 0) SendEd(h, SCI_GOTOLINE, curLine);
+
+    RelexTab(h);
+
+    UpdateOutline(tabs[currentTab]);
+
+    InvalidateRect(hwndMain, NULL, FALSE);
+
+    LogToConsoleW(L"> Код отформатирован (Shift+Alt+F).", LOG_SUCCESS);
 
 }
 
@@ -2064,7 +4074,229 @@ struct Pal {
 
 Pal GetPalette() {
 
-    if (isDarkTheme) {
+    switch (currentTheme) {
+
+    case 1: // VS Code Light+
+
+        return {
+
+            RGB(255, 255, 255), RGB(20, 20, 20), RGB(245, 245, 248), RGB(110, 110, 120),
+
+            RGB(173, 214, 255), RGB(245, 246, 250),
+
+            RGB(0, 128, 0), RGB(163, 21, 21), RGB(9, 134, 88), RGB(0, 0, 255),
+
+            RGB(175, 0, 219), RGB(38, 127, 153), RGB(121, 94, 38), RGB(0, 112, 193),
+
+            RGB(175, 0, 219), RGB(0, 0, 0), RGB(128, 0, 0), RGB(229, 0, 0),
+
+            RGB(215, 215, 220), RGB(210, 235, 210), RGB(0, 0, 0),
+
+            RGB(238, 238, 242), RGB(222, 222, 230), RGB(255, 255, 255), RGB(232, 232, 238),
+
+            RGB(242, 242, 248), RGB(195, 195, 205), RGB(0, 122, 204), RGB(255, 255, 255), RGB(0, 122, 204)
+
+        };
+
+    case 2: // Cyber Neon / Dracula
+
+        return {
+
+            RGB(19, 17, 28),    // bg
+
+            RGB(248, 248, 242), // fg
+
+            RGB(15, 13, 23),    // lineNumBg
+
+            RGB(98, 114, 164),  // lineNumFg
+
+            RGB(68, 71, 90),    // sel
+
+            RGB(31, 28, 46),    // caretLine
+
+            RGB(98, 114, 164),  // comment
+
+            RGB(241, 250, 140), // str
+
+            RGB(189, 147, 249), // num
+
+            RGB(255, 121, 198), // kw
+
+            RGB(255, 121, 198), // ctrl
+
+            RGB(139, 233, 253), // type
+
+            RGB(80, 250, 123),  // func
+
+            RGB(189, 147, 249), // cons
+
+            RGB(255, 184, 108), // pre
+
+            RGB(248, 248, 242), // op
+
+            RGB(255, 121, 198), // tag
+
+            RGB(80, 250, 123),  // attr
+
+            RGB(52, 46, 78),    // guide
+
+            RGB(75, 58, 110),   // braceBg
+
+            RGB(241, 250, 140), // braceFg
+
+            RGB(22, 20, 34),    // uiTopBar
+
+            RGB(13, 12, 20),    // uiTabBar
+
+            RGB(19, 17, 28),    // uiTabActive
+
+            RGB(26, 23, 39),    // uiTabInactive
+
+            RGB(38, 34, 56),    // uiTabHover
+
+            RGB(55, 48, 82),    // uiBorder
+
+            RGB(12, 10, 18),    // uiStatusBg
+
+            RGB(215, 210, 235), // uiStatusFg
+
+            RGB(189, 147, 249)  // uiAccent
+
+        };
+
+    case 3: // Monokai Pro
+
+        return {
+
+            RGB(39, 40, 34),
+
+            RGB(248, 248, 242),
+
+            RGB(33, 34, 29),
+
+            RGB(144, 144, 138),
+
+            RGB(73, 72, 62),
+
+            RGB(52, 53, 45),
+
+            RGB(117, 113, 94),
+
+            RGB(230, 219, 116),
+
+            RGB(174, 129, 255),
+
+            RGB(249, 38, 114),
+
+            RGB(249, 38, 114),
+
+            RGB(102, 217, 239),
+
+            RGB(166, 226, 46),
+
+            RGB(174, 129, 255),
+
+            RGB(253, 151, 31),
+
+            RGB(248, 248, 242),
+
+            RGB(249, 38, 114),
+
+            RGB(166, 226, 46),
+
+            RGB(70, 71, 60),
+
+            RGB(82, 80, 66),
+
+            RGB(253, 151, 31),
+
+            RGB(34, 35, 30),
+
+            RGB(26, 27, 23),
+
+            RGB(39, 40, 34),
+
+            RGB(45, 46, 39),
+
+            RGB(62, 63, 53),
+
+            RGB(70, 71, 60),
+
+            RGB(24, 25, 21),
+
+            RGB(220, 220, 210),
+
+            RGB(253, 151, 31)
+
+        };
+
+    case 4: // One Dark Pro
+
+        return {
+
+            RGB(40, 44, 52),
+
+            RGB(171, 178, 191),
+
+            RGB(33, 37, 43),
+
+            RGB(99, 109, 131),
+
+            RGB(62, 68, 81),
+
+            RGB(44, 49, 60),
+
+            RGB(92, 99, 112),
+
+            RGB(152, 195, 121),
+
+            RGB(209, 154, 102),
+
+            RGB(198, 120, 221),
+
+            RGB(198, 120, 221),
+
+            RGB(229, 192, 123),
+
+            RGB(97, 175, 239),
+
+            RGB(86, 182, 194),
+
+            RGB(224, 108, 117),
+
+            RGB(86, 182, 194),
+
+            RGB(224, 108, 117),
+
+            RGB(209, 154, 102),
+
+            RGB(58, 64, 76),
+
+            RGB(70, 78, 95),
+
+            RGB(229, 192, 123),
+
+            RGB(33, 37, 43),
+
+            RGB(28, 31, 36),
+
+            RGB(40, 44, 52),
+
+            RGB(35, 39, 46),
+
+            RGB(52, 58, 68),
+
+            RGB(58, 64, 76),
+
+            RGB(24, 27, 32),
+
+            RGB(180, 188, 200),
+
+            RGB(97, 175, 239)
+
+        };
+
+    default: // 0: VS Code Dark+
 
         return {
 
@@ -2132,26 +4364,6 @@ Pal GetPalette() {
 
     }
 
-    return {
-
-        RGB(255, 255, 255), RGB(20, 20, 20), RGB(245, 245, 248), RGB(110, 110, 120),
-
-        RGB(173, 214, 255), RGB(245, 246, 250),
-
-        RGB(0, 128, 0), RGB(163, 21, 21), RGB(9, 134, 88), RGB(0, 0, 255),
-
-        RGB(175, 0, 219), RGB(38, 127, 153), RGB(121, 94, 38), RGB(0, 112, 193),
-
-        RGB(175, 0, 219), RGB(0, 0, 0), RGB(128, 0, 0), RGB(229, 0, 0),
-
-        RGB(215, 215, 220), RGB(210, 235, 210), RGB(0, 0, 0),
-
-        RGB(238, 238, 242), RGB(222, 222, 230), RGB(255, 255, 255), RGB(232, 232, 238),
-
-        RGB(242, 242, 248), RGB(195, 195, 205), RGB(0, 122, 204), RGB(255, 255, 255), RGB(0, 122, 204)
-
-    };
-
 }
 
 
@@ -2188,6 +4400,18 @@ void SetupEditor(HWND h) {
 
     SendEd(h, SCI_SETMARGINLEFT, 0, 8);
 
+    SendEd(h, SCI_AUTOCSETIGNORECASE, TRUE, 0);
+
+    SendEd(h, SCI_AUTOCSETMAXHEIGHT, 10, 0);
+
+    SendEd(h, SCI_AUTOCSETDROPRESTOFWORD, TRUE, 0);
+
+    SendEd(h, SCI_AUTOCSETAUTOHIDE, TRUE, 0);
+
+    SendEd(h, SCI_AUTOCSETORDER, SC_ORDER_PERFORMSORT, 0);
+
+    SendEd(h, SCI_SETWRAPMODE, g_wordWrap ? SC_WRAP_WORD : SC_WRAP_NONE, 0);
+
     UpdateLineMargin(h);
 
 }
@@ -2222,9 +4446,9 @@ void ApplyThemeToEditor(HWND h) {
 
     SendEd(h, SCI_SETMARGINTYPEN, MARGIN_MARKERS, SC_MARGIN_SYMBOL);
 
-    SendEd(h, SCI_SETMARGINWIDTHN, MARGIN_MARKERS, 6);
+    SendEd(h, SCI_SETMARGINWIDTHN, MARGIN_MARKERS, 10);
 
-    SendEd(h, SCI_SETMARGINMASKN, MARGIN_MARKERS, (1 << MARKER_UNSAVED) | (1 << MARKER_SAVED));
+    SendEd(h, SCI_SETMARGINMASKN, MARGIN_MARKERS, (1 << MARKER_UNSAVED) | (1 << MARKER_SAVED) | (1 << MARKER_ERROR));
 
     SendEd(h, SCI_SETMARGINBACKN, MARGIN_MARKERS, p.lineNumBg);
 
@@ -2243,6 +4467,14 @@ void ApplyThemeToEditor(HWND h) {
     SendEd(h, SCI_MARKERSETFORE, MARKER_SAVED, RGB(46, 204, 113));
 
     SendEd(h, SCI_MARKERSETBACK, MARKER_SAVED, RGB(46, 204, 113));
+
+
+
+    SendEd(h, SCI_MARKERDEFINE, MARKER_ERROR, SC_MARK_CIRCLE);
+
+    SendEd(h, SCI_MARKERSETFORE, MARKER_ERROR, RGB(255, 255, 255));
+
+    SendEd(h, SCI_MARKERSETBACK, MARKER_ERROR, RGB(235, 65, 65));
 
 
 
@@ -2312,6 +4544,16 @@ void ApplyThemeToEditor(HWND h) {
 
 
 
+    SendEd(h, SCI_INDICSETSTYLE, INDIC_WORD_HIGHLIGHT, INDIC_ROUNDBOX);
+
+    SendEd(h, SCI_INDICSETFORE, INDIC_WORD_HIGHLIGHT, p.uiAccent);
+
+    SendEd(h, SCI_INDICSETALPHA, INDIC_WORD_HIGHLIGHT, 45);
+
+    SendEd(h, SCI_INDICSETOUTLINEALPHA, INDIC_WORD_HIGHLIGHT, 140);
+
+
+
     auto S = [&](int id, COLORREF fg, bool bold = false) {
 
         SendEd(h, SCI_STYLESETFORE, id, fg);
@@ -2354,6 +4596,8 @@ void ApplyThemeToEditor(HWND h) {
 
 
 
+    SendEd(h, SCI_SETWRAPMODE, g_wordWrap ? SC_WRAP_WORD : SC_WRAP_NONE, 0);
+
     UpdateLineMargin(h);
 
     RelexTab(h);
@@ -2364,6 +4608,8 @@ void ApplyThemeToEditor(HWND h) {
 
 void ApplyThemeToAll() {
 
+    isDarkTheme = (currentTheme != 1);
+
     ApplyDwmDarkTitleBar(hwndMain, isDarkTheme);
 
     for (auto& tab : tabs) {
@@ -2372,7 +4618,9 @@ void ApplyThemeToAll() {
 
     }
 
-    COLORREF conBg = isDarkTheme ? RGB(15, 15, 18) : RGB(248, 248, 250);
+    Pal pal = GetPalette();
+
+    COLORREF conBg = isDarkTheme ? pal.uiTabBar : RGB(248, 248, 250);
 
     SendEd(hwndConsole, SCI_STYLESETFONT, STYLE_DEFAULT, (LPARAM)"Consolas");
 
@@ -2384,7 +4632,7 @@ void ApplyThemeToAll() {
 
 
 
-    SendEd(hwndConsole, SCI_STYLESETFORE, LOG_NORMAL, isDarkTheme ? RGB(180, 180, 195) : RGB(40, 40, 40));
+    SendEd(hwndConsole, SCI_STYLESETFORE, LOG_NORMAL, isDarkTheme ? pal.fg : RGB(40, 40, 40));
 
     SendEd(hwndConsole, SCI_STYLESETFORE, LOG_ERROR, RGB(255, 85, 85));
 
@@ -2392,7 +4640,17 @@ void ApplyThemeToAll() {
 
     SendEd(hwndConsole, SCI_STYLESETFORE, LOG_SUCCESS, RGB(80, 220, 120));
 
-    SendEd(hwndConsole, SCI_STYLESETFORE, LOG_ACCENT, RGB(170, 130, 255));
+    SendEd(hwndConsole, SCI_STYLESETFORE, LOG_ACCENT, pal.uiAccent);
+
+
+
+    if (hwndFindDlg) { ApplyDwmDarkTitleBar(hwndFindDlg, isDarkTheme); InvalidateRect(hwndFindDlg, NULL, TRUE); }
+
+    if (hwndGotoDlg) { ApplyDwmDarkTitleBar(hwndGotoDlg, isDarkTheme); InvalidateRect(hwndGotoDlg, NULL, TRUE); }
+
+    if (hwndColorsDlg) { ApplyDwmDarkTitleBar(hwndColorsDlg, isDarkTheme); InvalidateRect(hwndColorsDlg, NULL, TRUE); }
+
+    if (hwndAboutDlg) { InvalidateRect(hwndAboutDlg, NULL, TRUE); }
 
 
 
@@ -2448,9 +4706,27 @@ std::vector<ChatColorItem> g_chatColors = {
 
     { L"{pink}",         "{pink}",       RGB(255, 135, 200), {0,0,0,0} },
 
+    { L"{teamcolor}",    "{teamcolor}",  RGB(120, 190, 255), {0,0,0,0} },
+
+    { L"{darkred}",      "{darkred}",    RGB(195, 35, 35),   {0,0,0,0} },
+
+    { L"{fullred}",      "{fullred}",    RGB(255, 0, 0),     {0,0,0,0} },
+
+    { L"{grey}",         "{grey}",       RGB(165, 170, 180), {0,0,0,0} },
+
+    { L"{yellow}",       "{yellow}",     RGB(255, 240, 90),  {0,0,0,0} },
+
+    { L"{orchid}",       "{orchid}",     RGB(218, 112, 214), {0,0,0,0} },
+
     { L"⚡ Команда !cmd",
 
       "RegConsoleCmd(\"sm_test\", Command_Test);\n\npublic Action Command_Test(int client, int args)\n{\n    if (!client || !IsClientInGame(client)) return Plugin_Handled;\n    CPrintToChat(client, \"{green}[Server]{default} Команда выполнена!\");\n    return Plugin_Handled;\n}\n",
+
+      RGB(160, 120, 255), {0,0,0,0} },
+
+    { L"⚡ Админ !cmd",
+
+      "RegAdminCmd(\"sm_admincmd\", Command_Admin, ADMFLAG_GENERIC, \"Описание команды\");\n\npublic Action Command_Admin(int client, int args)\n{\n    if (!client || !IsClientInGame(client)) return Plugin_Handled;\n    return Plugin_Handled;\n}\n",
 
       RGB(160, 120, 255), {0,0,0,0} },
 
@@ -2460,11 +4736,41 @@ std::vector<ChatColorItem> g_chatColors = {
 
       RGB(160, 120, 255), {0,0,0,0} },
 
+    { L"⚡ Раунд Start",
+
+      "HookEvent(\"round_start\", Event_RoundStart);\n\npublic void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)\n{\n    \n}\n",
+
+      RGB(160, 120, 255), {0,0,0,0} },
+
     { L"⚡ Цикл игроков",
 
       "for (int i = 1; i <= MaxClients; i++)\n{\n    if (IsClientInGame(i) && !IsFakeClient(i) && IsPlayerAlive(i))\n    {\n        \n    }\n}\n",
 
-      RGB(160, 120, 255), {0,0,0,0} }
+      RGB(160, 120, 255), {0,0,0,0} },
+
+    { L"⚡ Меню (Menu)",
+
+      "Menu menu = new Menu(MenuHandler_Main);\nmenu.SetTitle(\"Заголовок меню:\");\nmenu.AddItem(\"item1\", \"Пункт 1\");\nmenu.ExitButton = true;\nmenu.Display(client, MENU_TIME_FOREVER);\n\npublic int MenuHandler_Main(Menu menu, MenuAction action, int param1, int param2)\n{\n    if (action == MenuAction_Select)\n    {\n        char info[32];\n        menu.GetItem(param2, info, sizeof(info));\n    }\n    else if (action == MenuAction_End)\n    {\n        delete menu;\n    }\n    return 0;\n}\n",
+
+      RGB(80, 210, 175), {0,0,0,0} },
+
+    { L"⚡ Таймер (Timer)",
+
+      "CreateTimer(1.0, Timer_Callback, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);\n\npublic Action Timer_Callback(Handle timer, int userid)\n{\n    int client = GetClientOfUserId(userid);\n    if (!client || !IsClientInGame(client)) return Plugin_Stop;\n    return Plugin_Continue;\n}\n",
+
+      RGB(80, 210, 175), {0,0,0,0} },
+
+    { L"⚡ Конвар (ConVar)",
+
+      "ConVar g_cvEnabled;\ng_cvEnabled = CreateConVar(\"sm_plugin_enabled\", \"1\", \"Enable/disable plugin\", _, true, 0.0, true, 1.0);\nAutoExecConfig(true, \"plugin_config\");\n",
+
+      RGB(80, 210, 175), {0,0,0,0} },
+
+    { L"⚡ KeyValues",
+
+      "char sPath[PLATFORM_MAX_PATH];\nBuildPath(Path_SM, sPath, sizeof(sPath), \"configs/my_config.cfg\");\nKeyValues kv = new KeyValues(\"Config\");\nif (kv.ImportFromFile(sPath))\n{\n    if (kv.GotoFirstSubKey())\n    {\n        do {\n            \n        } while (kv.GotoNextKey());\n    }\n}\ndelete kv;\n",
+
+      RGB(80, 210, 175), {0,0,0,0} }
 
 };
 
@@ -2482,19 +4788,21 @@ LRESULT CALLBACK ColorsDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPara
 
         ApplyDwmDarkTitleBar(hwnd, isDarkTheme);
 
+        int rows = ((int)g_chatColors.size() + 2) / 3;
+
         int idx = 0;
 
-        for (int row = 0; row < 5; row++) {
+        for (int row = 0; row < rows; row++) {
 
             for (int col = 0; col < 3; col++) {
 
                 if (idx < (int)g_chatColors.size()) {
 
-                    int x = 18 + col * 142;
+                    int x = 18 + col * 144;
 
-                    int y = 50 + row * 42;
+                    int y = 48 + row * 38;
 
-                    g_chatColors[idx].rc = { x, y, x + 134, y + 34 };
+                    g_chatColors[idx].rc = { x, y, x + 136, y + 32 };
 
                     idx++;
 
@@ -2522,7 +4830,7 @@ LRESULT CALLBACK ColorsDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPara
 
 
 
-        HBRUSH hbrBg = CreateSolidBrush(isDarkTheme ? RGB(24, 24, 29) : RGB(242, 242, 247));
+        HBRUSH hbrBg = CreateSolidBrush(isDarkTheme ? pal.uiTopBar : RGB(242, 242, 247));
 
         FillRect(hdc, &rc, hbrBg);
 
@@ -2556,7 +4864,7 @@ LRESULT CALLBACK ColorsDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPara
 
         SetTextColor(hdc, isDarkTheme ? RGB(255, 255, 255) : RGB(20, 20, 20));
 
-        RECT rHdr = { 18, 12, rc.right - 40, 40 };
+        RECT rHdr = { 18, 10, rc.right - 40, 38 };
 
         DrawTextW(hdc, L"🎨 Цвета MoreColors и Быстрые заготовки SourcePawn:", -1, &rHdr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
@@ -2570,13 +4878,15 @@ LRESULT CALLBACK ColorsDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPara
 
 
 
+        SelectObject(hdc, hUIFont);
+
         for (int i = 0; i < (int)g_chatColors.size(); i++) {
 
             RECT r = g_chatColors[i].rc;
 
             bool hov = (i == g_hoverColorIdx);
 
-            HBRUSH hCard = CreateSolidBrush(hov ? RGB(52, 52, 64) : RGB(35, 35, 42));
+            HBRUSH hCard = CreateSolidBrush(hov ? pal.uiTabHover : (isDarkTheme ? pal.uiTabInactive : RGB(226, 226, 236)));
 
             FillRect(hdc, &r, hCard);
 
@@ -2584,7 +4894,7 @@ LRESULT CALLBACK ColorsDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPara
 
 
 
-            RECT rSwatch = { r.left + 8, r.top + 8, r.left + 22, r.bottom - 8 };
+            RECT rSwatch = { r.left + 8, r.top + 8, r.left + 20, r.bottom - 8 };
 
             HBRUSH hSw = CreateSolidBrush(g_chatColors[i].color);
 
@@ -2594,9 +4904,9 @@ LRESULT CALLBACK ColorsDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPara
 
 
 
-            SetTextColor(hdc, g_chatColors[i].color);
+            SetTextColor(hdc, isDarkTheme ? g_chatColors[i].color : RGB(25, 25, 35));
 
-            RECT rTxt = { r.left + 28, r.top, r.right - 4, r.bottom };
+            RECT rTxt = { r.left + 26, r.top, r.right - 4, r.bottom };
 
             DrawTextW(hdc, g_chatColors[i].title, -1, &rTxt, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
@@ -2676,6 +4986,10 @@ LRESULT CALLBACK ColorsDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPara
 
                     RelexTab(tabs[currentTab].hwndEditor);
 
+                    UpdateOutline(tabs[currentTab]);
+
+                    InvalidateRect(hwndMain, NULL, FALSE);
+
                     SetFocus(tabs[currentTab].hwndEditor);
 
                 }
@@ -2740,11 +5054,13 @@ void ShowChatColorsDialog() {
 
     GetWindowRect(hwndMain, &rcMain);
 
-    int w = 456, h = 274;
+    int rows = ((int)g_chatColors.size() + 2) / 3;
+
+    int w = 460, h = 58 + rows * 38;
 
     int x = rcMain.left + (rcMain.right - rcMain.left - w) / 2;
 
-    int y = rcMain.top + 95;
+    int y = rcMain.top + 80;
 
     hwndColorsDlg = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"KovaChatColorsCls", L"",
 
@@ -2768,7 +5084,7 @@ bool SelectCompilerDlg() {
 
     ofn.hwndOwner = hwndMain;
 
-    ofn.lpstrFilter = L"SourcePawn Compiler (spcomp.exe)\0spcomp.exe\0Все файлы (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"SourcePawn Compiler (spcomp*.exe)\0spcomp*.exe\0Все файлы (*.*)\0*.*\0";
 
     ofn.lpstrFile = szFile;
 
@@ -2782,7 +5098,7 @@ bool SelectCompilerDlg() {
 
         SaveConfig();
 
-        LogToConsoleW((std::wstring(L"> Выбран и сохранен компилятор spcomp.exe: ") + szCompilerPath).c_str(), LOG_SUCCESS);
+        LogToConsoleW((std::wstring(L"> Выбран и сохранен компилятор: ") + szCompilerPath).c_str(), LOG_SUCCESS);
 
         InvalidateRect(hwndMain, NULL, FALSE);
 
@@ -2797,6 +5113,86 @@ bool SelectCompilerDlg() {
 
 
 void SaveCurrentFile(bool forceSaveAs = false);
+
+
+
+static std::wstring ConvertProcessLineToWide(const std::string& line) {
+
+    if (line.empty()) return L"";
+
+    int wLen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, line.data(), (int)line.size(), NULL, 0);
+
+    UINT cp = CP_UTF8;
+
+    if (wLen <= 0) {
+
+        cp = CP_ACP;
+
+        wLen = MultiByteToWideChar(CP_ACP, 0, line.data(), (int)line.size(), NULL, 0);
+
+    }
+
+    if (wLen <= 0) return L"";
+
+    std::wstring res(wLen, 0);
+
+    MultiByteToWideChar(cp, (cp == CP_UTF8) ? MB_ERR_INVALID_CHARS : 0, line.data(), (int)line.size(), &res[0], wLen);
+
+    return res;
+
+}
+
+
+
+static int ExtractErrorLineNumber(const std::string& s) {
+
+    size_t pos = 0;
+
+    while (true) {
+
+        size_t openP = s.find('(', pos);
+
+        if (openP == std::string::npos) break;
+
+        size_t closeP = s.find(')', openP + 1);
+
+        if (closeP == std::string::npos) break;
+
+        std::string inside = s.substr(openP + 1, closeP - openP - 1);
+
+        if (!inside.empty()) {
+
+            size_t endNum = 0;
+
+            while (endNum < inside.size() && isdigit((unsigned char)inside[endNum])) endNum++;
+
+            if (endNum > 0 && (endNum == inside.size() || inside.substr(endNum, 4) == " -- ")) {
+
+                int val = atoi(inside.substr(0, endNum).c_str());
+
+                if (val > 0) return val;
+
+            }
+
+        }
+
+        pos = openP + 1;
+
+    }
+
+    size_t lp = s.find("line ");
+
+    if (lp != std::string::npos) {
+
+        int val = atoi(s.c_str() + lp + 5);
+
+        if (val > 0) return val;
+
+    }
+
+    return -1;
+
+}
 
 
 
@@ -2827,6 +5223,8 @@ void RunSmartDispatcher() {
         SaveCurrentFile(false);
 
     }
+
+    SendActive(SCI_MARKERDELETEALL, MARKER_ERROR, 0);
 
 
 
@@ -2896,7 +5294,9 @@ void RunSmartDispatcher() {
 
     else if (lg == LANG_SP) {
 
-        if (wcslen(szCompilerPath) == 0 || GetFileAttributesW(szCompilerPath) == INVALID_FILE_ATTRIBUTES) {
+        AutoDetectSpcompSmart();
+
+        if (wcslen(szCompilerPath) == 0 || GetFileAttributesW(szCompilerPath) == INVALID_FILE_ATTRIBUTES || !IsValidWindowsExe(szCompilerPath)) {
 
             LogToConsoleW(L"[WARNING] Путь к spcomp.exe не указан. Укажите его в открывшемся окне.", LOG_WARNING);
 
@@ -2921,6 +5321,60 @@ void RunSmartDispatcher() {
         if (dot != std::wstring::npos) outSmx = outSmx.substr(0, dot) + L".smx";
 
         cmd = std::wstring(L"\"") + szCompilerPath + L"\" \"" + file + L"\" -o\"" + outSmx + L"\"";
+
+
+
+        std::wstring spcompDir = szCompilerPath;
+
+        size_t spSlash = spcompDir.find_last_of(L"\\/");
+
+        if (spSlash != std::wstring::npos) spcompDir = spcompDir.substr(0, spSlash);
+
+        std::vector<std::wstring> incCandidates = {
+
+            workDir + L"\\include",
+
+            spcompDir + L"\\include",
+
+            spcompDir + L"\\addons\\sourcemod\\scripting\\include",
+
+            spcompDir + L"\\..\\include"
+
+        };
+
+        std::vector<std::wstring> addedIncs;
+
+        for (const auto& incRaw : incCandidates) {
+
+            wchar_t incFull[MAX_PATH] = { 0 };
+
+            if (GetFullPathNameW(incRaw.c_str(), MAX_PATH, incFull, NULL) > 0) {
+
+                DWORD attr = GetFileAttributesW(incFull);
+
+                if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+
+                    bool dup = false;
+
+                    for (const auto& ex : addedIncs) {
+
+                        if (_wcsicmp(ex.c_str(), incFull) == 0) { dup = true; break; }
+
+                    }
+
+                    if (!dup) {
+
+                        addedIncs.push_back(incFull);
+
+                        cmd += std::wstring(L" -i\"") + incFull + L"\"";
+
+                    }
+
+                }
+
+            }
+
+        }
 
     }
 
@@ -2948,41 +5402,119 @@ void RunSmartDispatcher() {
 
         CloseHandle(hWrite);
 
-        char buffer[1024];
+        std::string rawOut;
+
+        char buffer[2048];
 
         DWORD read;
 
-        while (ReadFile(hRead, buffer, sizeof(buffer) - 1, &read, NULL) && read > 0) {
+        while (ReadFile(hRead, buffer, sizeof(buffer), &read, NULL) && read > 0) {
 
-            buffer[read] = 0;
-
-            int wLen = MultiByteToWideChar(CP_ACP, 0, buffer, read, NULL, 0);
-
-            std::wstring wStr(wLen, 0);
-
-            MultiByteToWideChar(CP_ACP, 0, buffer, read, &wStr[0], wLen);
-
-
-
-            int lType = LOG_NORMAL;
-
-            if (wcsstr(wStr.c_str(), L"error") || wcsstr(wStr.c_str(), L"fatal")) lType = LOG_ERROR;
-
-            else if (wcsstr(wStr.c_str(), L"warning")) lType = LOG_WARNING;
-
-
-
-            LogToConsoleW(wStr.c_str(), lType);
+            rawOut.append(buffer, read);
 
         }
 
         CloseHandle(hRead);
 
+        WaitForSingleObject(pi.hProcess, INFINITE);
+
+        DWORD exitCode = 0;
+
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+
         CloseHandle(pi.hProcess);
 
         CloseHandle(pi.hThread);
 
-        LogToConsoleW(L"[SUCCESS] Выполнение завершено (двойной клик по строке с ошибкой перенесет к коду).", LOG_SUCCESS);
+
+
+        size_t lineStart = 0;
+
+        while (lineStart < rawOut.size()) {
+
+            size_t nl = rawOut.find('\n', lineStart);
+
+            std::string line = (nl == std::string::npos) ? rawOut.substr(lineStart) : rawOut.substr(lineStart, nl - lineStart);
+
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+
+
+
+            if (!line.empty()) {
+
+                std::wstring wStr = ConvertProcessLineToWide(line);
+
+                std::wstring wLow = wStr;
+
+                std::transform(wLow.begin(), wLow.end(), wLow.begin(), [](wchar_t c) { return (wchar_t)towlower(c); });
+
+
+
+                int lType = LOG_NORMAL;
+
+                if (wLow.find(L"error") != std::wstring::npos || wLow.find(L"fatal") != std::wstring::npos || wLow.find(L"traceback") != std::wstring::npos) {
+
+                    lType = LOG_ERROR;
+
+                }
+
+                else if (wLow.find(L"warning") != std::wstring::npos) {
+
+                    lType = LOG_WARNING;
+
+                }
+
+                else if (wStr.find(L"Code size:") != std::wstring::npos || wStr.find(L"Data size:") != std::wstring::npos ||
+
+                    wStr.find(L"Stack/heap size:") != std::wstring::npos || wStr.find(L"Total requirements:") != std::wstring::npos ||
+
+                    wStr.find(L"Done.") != std::wstring::npos) {
+
+                    lType = LOG_SUCCESS;
+
+                }
+
+                LogToConsoleW(wStr.c_str(), lType);
+
+
+
+                if (lType == LOG_ERROR && currentTab >= 0) {
+
+                    int errLine = ExtractErrorLineNumber(line);
+
+                    if (errLine > 0) {
+
+                        SendActive(SCI_MARKERADD, errLine - 1, MARKER_ERROR);
+
+                    }
+
+                }
+
+            }
+
+            if (nl == std::string::npos) break;
+
+            lineStart = nl + 1;
+
+        }
+
+
+
+        if (exitCode == 0) {
+
+            LogToConsoleW(L"[SUCCESS] Выполнение завершено (двойной клик по строке с ошибкой перенесет к коду).", LOG_SUCCESS);
+
+        }
+
+        else {
+
+            wchar_t errMsg[192];
+
+            swprintf(errMsg, 192, L"[ОШИБКА] Процесс завершился с кодом %lu (двойной клик по ошибке перенесет к коду).", (unsigned long)exitCode);
+
+            LogToConsoleW(errMsg, LOG_ERROR);
+
+        }
 
     }
 
@@ -3016,39 +5548,7 @@ void JumpToErrorFromConsole() {
 
     SendEd(hwndConsole, SCI_GETLINE, line, (LPARAM)buf.data());
 
-    std::string s = buf.data();
-
-
-
-    int targetLine = -1;
-
-    size_t openP = s.find('(');
-
-    size_t closeP = s.find(')', openP == std::string::npos ? 0 : openP);
-
-    if (openP != std::string::npos && closeP != std::string::npos && closeP > openP + 1) {
-
-        std::string numStr = s.substr(openP + 1, closeP - openP - 1);
-
-        bool allDigits = true;
-
-        for (char c : numStr) if (!isdigit((unsigned char)c)) allDigits = false;
-
-        if (allDigits) targetLine = atoi(numStr.c_str());
-
-    }
-
-    if (targetLine < 0) {
-
-        size_t lp = s.find("line ");
-
-        if (lp != std::string::npos) {
-
-            targetLine = atoi(s.c_str() + lp + 5);
-
-        }
-
-    }
+    int targetLine = ExtractErrorLineNumber(buf.data());
 
 
 
@@ -3080,6 +5580,32 @@ void JumpToErrorFromConsole() {
 
 // ============================================================
 
+void ExecuteGotoLine() {
+
+    if (!hwndGotoDlg) return;
+
+    wchar_t numBuf[64] = { 0 };
+
+    GetWindowTextW(hEditGotoBox, numBuf, 64);
+
+    int line = _wtoi(numBuf);
+
+    if (line > 0 && currentTab >= 0) {
+
+        SendActive(SCI_GOTOLINE, line - 1);
+
+        SendActive(SCI_SCROLLCARET);
+
+        SetFocus(tabs[currentTab].hwndEditor);
+
+    }
+
+    DestroyWindow(hwndGotoDlg);
+
+}
+
+
+
 LRESULT CALLBACK GotoDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
     switch (uMsg) {
@@ -3088,9 +5614,11 @@ LRESULT CALLBACK GotoDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
         ApplyDwmDarkTitleBar(hwnd, isDarkTheme);
 
+        Pal pal = GetPalette();
+
         if (hDarkEditBrush) DeleteObject(hDarkEditBrush);
 
-        hDarkEditBrush = CreateSolidBrush(isDarkTheme ? RGB(38, 38, 44) : RGB(255, 255, 255));
+        hDarkEditBrush = CreateSolidBrush(isDarkTheme ? pal.uiTabInactive : RGB(255, 255, 255));
 
         hEditGotoBox = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL,
 
@@ -3108,9 +5636,11 @@ LRESULT CALLBACK GotoDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
         HDC hdc = (HDC)wParam;
 
-        SetTextColor(hdc, isDarkTheme ? RGB(240, 240, 245) : RGB(10, 10, 10));
+        Pal pal = GetPalette();
 
-        SetBkColor(hdc, isDarkTheme ? RGB(38, 38, 44) : RGB(255, 255, 255));
+        SetTextColor(hdc, isDarkTheme ? pal.fg : RGB(10, 10, 10));
+
+        SetBkColor(hdc, isDarkTheme ? pal.uiTabInactive : RGB(255, 255, 255));
 
         return (LRESULT)hDarkEditBrush;
 
@@ -3130,7 +5660,7 @@ LRESULT CALLBACK GotoDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
 
 
-        HBRUSH hbrBg = CreateSolidBrush(isDarkTheme ? RGB(26, 26, 31) : RGB(242, 242, 247));
+        HBRUSH hbrBg = CreateSolidBrush(isDarkTheme ? pal.uiTopBar : RGB(242, 242, 247));
 
         FillRect(hdc, &rc, hbrBg);
 
@@ -3176,7 +5706,7 @@ LRESULT CALLBACK GotoDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
 
 
-        HBRUSH hb2 = CreateSolidBrush(isDarkTheme ? RGB(45, 45, 54) : RGB(220, 220, 230));
+        HBRUSH hb2 = CreateSolidBrush(isDarkTheme ? pal.uiTabHover : RGB(220, 220, 230));
 
         FillRect(hdc, &bCancel, hb2);
 
@@ -3210,23 +5740,7 @@ LRESULT CALLBACK GotoDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
         if (PtInRect(&bGo, pt)) {
 
-            wchar_t numBuf[64] = { 0 };
-
-            GetWindowTextW(hEditGotoBox, numBuf, 64);
-
-            int line = _wtoi(numBuf);
-
-            if (line > 0 && currentTab >= 0) {
-
-                SendActive(SCI_GOTOLINE, line - 1);
-
-                SendActive(SCI_SCROLLCARET);
-
-                SetFocus(tabs[currentTab].hwndEditor);
-
-            }
-
-            DestroyWindow(hwnd);
+            ExecuteGotoLine();
 
             return 0;
 
@@ -3245,6 +5759,14 @@ LRESULT CALLBACK GotoDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         return 0;
 
     }
+
+    case WM_KEYDOWN:
+
+        if (wParam == VK_ESCAPE) { DestroyWindow(hwnd); return 0; }
+
+        if (wParam == VK_RETURN) { ExecuteGotoLine(); return 0; }
+
+        break;
 
     case WM_DESTROY:
 
@@ -3265,6 +5787,8 @@ void ShowGotoLineDialog() {
     if (hwndGotoDlg) {
 
         SetForegroundWindow(hwndGotoDlg);
+
+        SetFocus(hEditGotoBox);
 
         return;
 
@@ -3310,6 +5834,8 @@ void ShowGotoLineDialog() {
 
 void DoFindNext() {
 
+    if (!hEditFindBox) return;
+
     wchar_t buf[256] = { 0 };
 
     GetWindowTextW(hEditFindBox, buf, 256);
@@ -3320,11 +5846,9 @@ void DoFindNext() {
 
 
 
-    int size = WideCharToMultiByte(CP_UTF8, 0, buf, -1, NULL, 0, NULL, NULL);
+    std::string utf8 = WideToUtf8(buf);
 
-    std::vector<char> utf8(size);
-
-    WideCharToMultiByte(CP_UTF8, 0, buf, -1, &utf8[0], size, NULL, NULL);
+    int flags = g_findMatchCase ? SCFIND_MATCHCASE : 0;
 
 
 
@@ -3334,7 +5858,7 @@ void DoFindNext() {
 
     SendActive(SCI_SEARCHANCHOR, 0, 0);
 
-    int pos = (int)SendActive(SCI_SEARCHNEXT, 0, (LPARAM)utf8.data());
+    int pos = (int)SendActive(SCI_SEARCHNEXT, flags, (LPARAM)utf8.c_str());
 
     if (pos == -1) {
 
@@ -3342,7 +5866,63 @@ void DoFindNext() {
 
         SendActive(SCI_SEARCHANCHOR, 0, 0);
 
-        pos = (int)SendActive(SCI_SEARCHNEXT, 0, (LPARAM)utf8.data());
+        pos = (int)SendActive(SCI_SEARCHNEXT, flags, (LPARAM)utf8.c_str());
+
+    }
+
+    if (pos != -1) {
+
+        SendActive(SCI_SCROLLCARET, 0, 0);
+
+    }
+
+    else {
+
+        LogToConsoleW(L"[ПОИСК] Совпадений не найдено.", LOG_WARNING);
+
+    }
+
+}
+
+
+
+void DoFindPrev() {
+
+    if (!hEditFindBox) return;
+
+    wchar_t buf[256] = { 0 };
+
+    GetWindowTextW(hEditFindBox, buf, 256);
+
+    if (wcslen(buf) == 0) return;
+
+    wcscpy_s(szFindWhat, buf);
+
+
+
+    std::string utf8 = WideToUtf8(buf);
+
+    int flags = g_findMatchCase ? SCFIND_MATCHCASE : 0;
+
+
+
+    int curStart = (int)SendActive(SCI_GETSELECTIONSTART);
+
+    SendActive(SCI_GOTOPOS, curStart);
+
+    SendActive(SCI_SEARCHANCHOR, 0, 0);
+
+    int pos = (int)SendActive(SCI_SEARCHPREV, flags, (LPARAM)utf8.c_str());
+
+    if (pos == -1) {
+
+        int len = (int)SendActive(SCI_GETLENGTH);
+
+        SendActive(SCI_GOTOPOS, len);
+
+        SendActive(SCI_SEARCHANCHOR, 0, 0);
+
+        pos = (int)SendActive(SCI_SEARCHPREV, flags, (LPARAM)utf8.c_str());
 
     }
 
@@ -3364,6 +5944,8 @@ void DoFindNext() {
 
 void DoReplaceOne(bool all) {
 
+    if (!hEditFindBox || !hEditReplaceBox) return;
+
     wchar_t fBuf[256] = { 0 }, rBuf[256] = { 0 };
 
     GetWindowTextW(hEditFindBox, fBuf, 256);
@@ -3378,19 +5960,11 @@ void DoReplaceOne(bool all) {
 
 
 
-    int fSize = WideCharToMultiByte(CP_UTF8, 0, fBuf, -1, NULL, 0, NULL, NULL);
+    std::string fUtf8 = WideToUtf8(fBuf);
 
-    std::vector<char> fUtf8(fSize);
+    std::string rUtf8 = WideToUtf8(rBuf);
 
-    WideCharToMultiByte(CP_UTF8, 0, fBuf, -1, &fUtf8[0], fSize, NULL, NULL);
-
-
-
-    int rSize = WideCharToMultiByte(CP_UTF8, 0, rBuf, -1, NULL, 0, NULL, NULL);
-
-    std::vector<char> rUtf8(rSize);
-
-    WideCharToMultiByte(CP_UTF8, 0, rBuf, -1, &rUtf8[0], rSize, NULL, NULL);
+    int flags = g_findMatchCase ? SCFIND_MATCHCASE : 0;
 
 
 
@@ -3400,7 +5974,7 @@ void DoReplaceOne(bool all) {
 
         if (SendActive(SCI_GETSELECTIONSTART) != SendActive(SCI_GETSELECTIONEND)) {
 
-            SendActive(SCI_REPLACESEL, 0, (LPARAM)rUtf8.data());
+            SendActive(SCI_REPLACESEL, 0, (LPARAM)rUtf8.c_str());
 
         }
 
@@ -3410,23 +5984,27 @@ void DoReplaceOne(bool all) {
 
         int count = 0;
 
+        SendActive(SCI_BEGINUNDOACTION);
+
         SendActive(SCI_GOTOPOS, 0);
 
         while (true) {
 
             SendActive(SCI_SEARCHANCHOR, 0, 0);
 
-            int pos = (int)SendActive(SCI_SEARCHNEXT, 0, (LPARAM)fUtf8.data());
+            int pos = (int)SendActive(SCI_SEARCHNEXT, flags, (LPARAM)fUtf8.c_str());
 
             if (pos == -1) break;
 
-            SendActive(SCI_REPLACESEL, 0, (LPARAM)rUtf8.data());
+            SendActive(SCI_REPLACESEL, 0, (LPARAM)rUtf8.c_str());
 
-            SendActive(SCI_GOTOPOS, pos + (int)strlen(rUtf8.data()));
+            SendActive(SCI_GOTOPOS, pos + (int)rUtf8.size());
 
             count++;
 
         }
+
+        SendActive(SCI_ENDUNDOACTION);
 
         wchar_t msg[128];
 
@@ -3448,25 +6026,29 @@ LRESULT CALLBACK FindDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
         ApplyDwmDarkTitleBar(hwnd, isDarkTheme);
 
+        Pal pal = GetPalette();
+
         if (hDarkEditBrush) DeleteObject(hDarkEditBrush);
 
-        hDarkEditBrush = CreateSolidBrush(isDarkTheme ? RGB(38, 38, 44) : RGB(255, 255, 255));
+        hDarkEditBrush = CreateSolidBrush(isDarkTheme ? pal.uiTabInactive : RGB(255, 255, 255));
 
 
 
         hEditFindBox = CreateWindowExW(0, L"EDIT", szFindWhat, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
 
-            110, 48, 280, 24, hwnd, (HMENU)101, hInst, NULL);
+            110, 48, 286, 24, hwnd, (HMENU)101, hInst, NULL);
 
         hEditReplaceBox = CreateWindowExW(0, L"EDIT", szReplaceWith, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
 
-            110, 84, 280, 24, hwnd, (HMENU)102, hInst, NULL);
+            110, 84, 330, 24, hwnd, (HMENU)102, hInst, NULL);
 
 
 
         SendMessage(hEditFindBox, WM_SETFONT, (WPARAM)hUIFont, TRUE);
 
         SendMessage(hEditReplaceBox, WM_SETFONT, (WPARAM)hUIFont, TRUE);
+
+        SendMessage(hEditFindBox, EM_SETSEL, 0, -1);
 
         SetFocus(hEditFindBox);
 
@@ -3478,9 +6060,11 @@ LRESULT CALLBACK FindDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
         HDC hdc = (HDC)wParam;
 
-        SetTextColor(hdc, isDarkTheme ? RGB(240, 240, 245) : RGB(10, 10, 10));
+        Pal pal = GetPalette();
 
-        SetBkColor(hdc, isDarkTheme ? RGB(38, 38, 44) : RGB(255, 255, 255));
+        SetTextColor(hdc, isDarkTheme ? pal.fg : RGB(10, 10, 10));
+
+        SetBkColor(hdc, isDarkTheme ? pal.uiTabInactive : RGB(255, 255, 255));
 
         return (LRESULT)hDarkEditBrush;
 
@@ -3500,7 +6084,7 @@ LRESULT CALLBACK FindDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
 
 
-        HBRUSH hbrBg = CreateSolidBrush(isDarkTheme ? RGB(26, 26, 31) : RGB(242, 242, 247));
+        HBRUSH hbrBg = CreateSolidBrush(isDarkTheme ? pal.uiTopBar : RGB(242, 242, 247));
 
         FillRect(hdc, &rc, hbrBg);
 
@@ -3534,9 +6118,17 @@ LRESULT CALLBACK FindDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
         SetTextColor(hdc, isDarkTheme ? RGB(255, 255, 255) : RGB(20, 20, 20));
 
-        RECT rcHdr = { 16, 12, rc.right - 20, 36 };
+        RECT rcHdr = { 16, 12, rc.right - 40, 36 };
 
         DrawTextW(hdc, L"Найти и заменить (Kova Search)", -1, &rcHdr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+
+
+        RECT rcCloseX = { rc.right - 34, 8, rc.right - 8, 34 };
+
+        SetTextColor(hdc, RGB(235, 85, 85));
+
+        DrawTextW(hdc, L"✕", -1, &rcCloseX, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
 
 
@@ -3554,23 +6146,37 @@ LRESULT CALLBACK FindDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
 
 
+        RECT rCase = { 402, 48, 440, 72 };
+
+        HBRUSH hbrCase = CreateSolidBrush(g_findMatchCase ? pal.uiAccent : (isDarkTheme ? pal.uiTabHover : RGB(220, 220, 230)));
+
+        FillRect(hdc, &rCase, hbrCase);
+
+        DeleteObject(hbrCase);
+
+        SetTextColor(hdc, (g_findMatchCase || isDarkTheme) ? RGB(255, 255, 255) : RGB(20, 20, 20));
+
+        DrawTextW(hdc, L"Aa", -1, &rCase, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+
+
         struct Btn { RECT r; const wchar_t* txt; bool accent; };
 
         Btn btns[] = {
 
-            { { 16, 126, 118, 156 },  L"Найти далее", true },
+            { { 16, 126, 114, 156 },  L"Найти пред.", false },
 
-            { { 126, 126, 224, 156 }, L"Заменить",    false },
+            { { 122, 126, 224, 156 }, L"Найти далее", true },
 
-            { { 232, 126, 330, 156 }, L"Заменить всё",false },
+            { { 232, 126, 330, 156 }, L"Заменить",    false },
 
-            { { 338, 126, 396, 156 }, L"Закрыть",     false }
+            { { 338, 126, 440, 156 }, L"Заменить всё",false }
 
         };
 
         for (auto& b : btns) {
 
-            HBRUSH hb = CreateSolidBrush(b.accent ? pal.uiAccent : (isDarkTheme ? RGB(45, 45, 54) : RGB(220, 220, 230)));
+            HBRUSH hb = CreateSolidBrush(b.accent ? pal.uiAccent : (isDarkTheme ? pal.uiTabHover : RGB(220, 220, 230)));
 
             FillRect(hdc, &b.r, hb);
 
@@ -3600,21 +6206,33 @@ LRESULT CALLBACK FindDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
-        RECT b1 = { 16, 126, 118, 156 };
+        RECT rc;
 
-        RECT b2 = { 126, 126, 224, 156 };
+        GetClientRect(hwnd, &rc);
 
-        RECT b3 = { 232, 126, 330, 156 };
+        RECT rcCloseX = { rc.right - 34, 8, rc.right - 8, 34 };
 
-        RECT b4 = { 338, 126, 396, 156 };
+        RECT rCase = { 402, 48, 440, 72 };
 
-        if (PtInRect(&b1, pt)) { DoFindNext(); return 0; }
+        RECT bPrev = { 16, 126, 114, 156 };
 
-        if (PtInRect(&b2, pt)) { DoReplaceOne(false); return 0; }
+        RECT bNext = { 122, 126, 224, 156 };
 
-        if (PtInRect(&b3, pt)) { DoReplaceOne(true); return 0; }
+        RECT bRep = { 232, 126, 330, 156 };
 
-        if (PtInRect(&b4, pt)) { DestroyWindow(hwnd); return 0; }
+        RECT bRepAll = { 338, 126, 440, 156 };
+
+        if (PtInRect(&rcCloseX, pt)) { DestroyWindow(hwnd); return 0; }
+
+        if (PtInRect(&rCase, pt)) { g_findMatchCase = !g_findMatchCase; InvalidateRect(hwnd, &rCase, FALSE); return 0; }
+
+        if (PtInRect(&bPrev, pt)) { DoFindPrev(); return 0; }
+
+        if (PtInRect(&bNext, pt)) { DoFindNext(); return 0; }
+
+        if (PtInRect(&bRep, pt)) { DoReplaceOne(false); return 0; }
+
+        if (PtInRect(&bRepAll, pt)) { DoReplaceOne(true); return 0; }
 
         SendMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
 
@@ -3625,6 +6243,10 @@ LRESULT CALLBACK FindDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     case WM_DESTROY:
 
         hwndFindDlg = NULL;
+
+        hEditFindBox = NULL;
+
+        hEditReplaceBox = NULL;
 
         return 0;
 
@@ -3638,9 +6260,49 @@ LRESULT CALLBACK FindDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
 void ShowCustomFindDialog() {
 
+    if (currentTab >= 0) {
+
+        int selS = (int)SendActive(SCI_GETSELECTIONSTART);
+
+        int selE = (int)SendActive(SCI_GETSELECTIONEND);
+
+        if (selE > selS && (selE - selS) < 250) {
+
+            std::vector<char> selBuf((size_t)(selE - selS) + 1, 0);
+
+            SendActive(SCI_GETSELTEXT, 0, (LPARAM)selBuf.data());
+
+            if (strchr(selBuf.data(), '\n') == NULL && strchr(selBuf.data(), '\r') == NULL) {
+
+                std::wstring wSel = Utf8ToWide(selBuf.data());
+
+                if (!wSel.empty() && wSel.size() < 255) {
+
+                    wcscpy_s(szFindWhat, wSel.c_str());
+
+                }
+
+            }
+
+        }
+
+    }
+
+
+
     if (hwndFindDlg) {
 
+        if (hEditFindBox) {
+
+            SetWindowTextW(hEditFindBox, szFindWhat);
+
+            SendMessageW(hEditFindBox, EM_SETSEL, 0, -1);
+
+        }
+
         SetForegroundWindow(hwndFindDlg);
+
+        SetFocus(hEditFindBox);
 
         return;
 
@@ -3664,7 +6326,7 @@ void ShowCustomFindDialog() {
 
     GetWindowRect(hwndMain, &rcMain);
 
-    int w = 412, h = 172;
+    int w = 456, h = 172;
 
     int x = rcMain.right - w - 30;
 
@@ -3682,11 +6344,249 @@ void ShowCustomFindDialog() {
 
 // ============================================================
 
-//  ОКНО "О ПРОГРАММЕ" (С ТВОЕЙ LOGO.ICO И БЕЗ ЛИШНИХ ССЫЛОК)
+//  ЛОГ ОБНОВЛЕНИЙ И ОКНО "О ПРОГРАММЕ"
 
 // ============================================================
 
 bool g_hoverAboutCloseBtn = false;
+
+bool g_hoverAboutLogBtn = false;
+
+bool g_hoverChangelogCloseBtn = false;
+
+
+
+LRESULT CALLBACK ChangelogWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+
+    switch (uMsg) {
+
+    case WM_CREATE:
+
+        ApplyDwmDarkTitleBar(hwnd, isDarkTheme);
+
+        return 0;
+
+    case WM_PAINT: {
+
+        PAINTSTRUCT ps;
+
+        HDC hdc = BeginPaint(hwnd, &ps);
+
+        RECT rc;
+
+        GetClientRect(hwnd, &rc);
+
+        Pal pal = GetPalette();
+
+
+
+        HBRUSH hbrBg = CreateSolidBrush(isDarkTheme ? pal.uiTopBar : RGB(242, 242, 247));
+
+        FillRect(hdc, &rc, hbrBg);
+
+        DeleteObject(hbrBg);
+
+
+
+        RECT rcTopBar = { 0, 0, rc.right, 4 };
+
+        HBRUSH hbrAcc = CreateSolidBrush(pal.uiAccent);
+
+        FillRect(hdc, &rcTopBar, hbrAcc);
+
+        DeleteObject(hbrAcc);
+
+
+
+        HPEN hPen = CreatePen(PS_SOLID, 1, pal.uiAccent);
+
+        HGDIOBJ oldPen = SelectObject(hdc, hPen);
+
+        HBRUSH oldBr = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+
+        Rectangle(hdc, 0, 0, rc.right, rc.bottom);
+
+        SelectObject(hdc, oldBr);
+
+        SelectObject(hdc, oldPen);
+
+        DeleteObject(hPen);
+
+
+
+        SetBkMode(hdc, TRANSPARENT);
+
+        SelectObject(hdc, hUIBoldFont);
+
+        SetTextColor(hdc, isDarkTheme ? RGB(255, 255, 255) : RGB(20, 20, 25));
+
+        RECT rHdr = { 22, 14, rc.right - 22, 42 };
+
+        DrawTextW(hdc, L"📋 Лог обновлений Kova Code Studio", -1, &rHdr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+
+
+        SelectObject(hdc, hUIFont);
+
+        SetTextColor(hdc, isDarkTheme ? RGB(205, 205, 218) : RGB(45, 45, 55));
+
+        RECT rTxt = { 22, 50, rc.right - 22, rc.bottom - 62 };
+
+        const wchar_t* logText =
+
+            L"Версия v1.3.0 (Текущая):\n"
+
+            L" • Встроенный FTP-менеджер (WinINet): подключение, навигация по папкам,\n"
+
+            L"   скачивание и открытие файлов прямо в редакторе, отправка обратно,\n"
+
+            L"   создание/удаление папок, автовыгрузка при Ctrl+S и сборка + .smx на FTP (F6)\n"
+
+            L" • Подсветка всех вхождений слова под курсором и мультикурсор (Ctrl+Shift+L)\n"
+
+            L" • Быстрое сворачивание/разворачивание всего кода (Ctrl+Shift+[ / ])\n"
+
+            L" • Обновлен шаблон SourcePawn (Ctrl+J) и убран лишний текст с панели\n\n"
+
+            L"Версия v1.2.0:\n"
+
+            L" • Автопоиск компилятора spcomp64/spcomp и папок include + маркеры ошибок\n"
+
+            L" • Боковая панель «Структура кода» (Ctrl+B) и автодополнение (Ctrl+Space)\n"
+
+            L" • Автоформатирование кода (Shift+Alt+F), 5 тем оформления, поддержка .cfg/.vdf\n"
+
+            L" • Защита несохраненных вкладок, поиск с учетом регистра (Aa), перенос строк (Alt+Z)\n\n"
+
+            L"Версия v1.0.0:\n"
+
+            L" • Нативный редактор на базе Scintilla, лексер SP/Python/HTML, Smart Run (F5)\n"
+
+            L" • Палитра цветов MoreColors + генератор кода (Ctrl+M) и сохранение сессии";
+
+        DrawTextW(hdc, logText, -1, &rTxt, DT_LEFT | DT_WORDBREAK);
+
+
+
+        RECT rcBtn = { (rc.right - 160) / 2, rc.bottom - 48, (rc.right + 160) / 2, rc.bottom - 16 };
+
+        HBRUSH hbrBtn = CreateSolidBrush(g_hoverChangelogCloseBtn ? pal.uiTabHover : pal.uiAccent);
+
+        FillRect(hdc, &rcBtn, hbrBtn);
+
+        DeleteObject(hbrBtn);
+
+        SelectObject(hdc, hUIBoldFont);
+
+        SetTextColor(hdc, RGB(255, 255, 255));
+
+        DrawTextW(hdc, L"Закрыть", -1, &rcBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+
+
+        EndPaint(hwnd, &ps);
+
+        return 0;
+
+    }
+
+    case WM_MOUSEMOVE: {
+
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+
+        RECT rc; GetClientRect(hwnd, &rc);
+
+        RECT rcBtn = { (rc.right - 160) / 2, rc.bottom - 48, (rc.right + 160) / 2, rc.bottom - 16 };
+
+        bool hov = PtInRect(&rcBtn, pt) != 0;
+
+        if (hov != g_hoverChangelogCloseBtn) {
+
+            g_hoverChangelogCloseBtn = hov;
+
+            InvalidateRect(hwnd, &rcBtn, FALSE);
+
+        }
+
+        return 0;
+
+    }
+
+    case WM_LBUTTONDOWN: {
+
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+
+        RECT rc; GetClientRect(hwnd, &rc);
+
+        RECT rcBtn = { (rc.right - 160) / 2, rc.bottom - 48, (rc.right + 160) / 2, rc.bottom - 16 };
+
+        if (PtInRect(&rcBtn, pt)) { DestroyWindow(hwnd); return 0; }
+
+        SendMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+
+        return 0;
+
+    }
+
+    case WM_KEYDOWN:
+
+        if (wParam == VK_ESCAPE || wParam == VK_RETURN) DestroyWindow(hwnd);
+
+        return 0;
+
+    case WM_DESTROY:
+
+        hwndChangelogDlg = NULL;
+
+        return 0;
+
+    }
+
+    return DefWindowProcW(hwnd, uMsg, wParam, lParam);
+
+}
+
+
+
+void ShowChangelogWindow() {
+
+    if (hwndChangelogDlg) {
+
+        SetForegroundWindow(hwndChangelogDlg);
+
+        return;
+
+    }
+
+    WNDCLASSW wc = { 0 };
+
+    wc.lpfnWndProc = ChangelogWndProc;
+
+    wc.hInstance = hInst;
+
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+
+    wc.lpszClassName = L"KovaChangelogCls";
+
+    RegisterClassW(&wc);
+
+
+
+    int w = 580, h = 450;
+
+    RECT rcMain;
+
+    GetWindowRect(hwndMain, &rcMain);
+
+    int x = rcMain.left + (rcMain.right - rcMain.left - w) / 2;
+
+    int y = rcMain.top + (rcMain.bottom - rcMain.top - h) / 2;
+
+    hwndChangelogDlg = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"KovaChangelogCls", L"",
+
+        WS_POPUP | WS_VISIBLE, x, y, w, h, hwndMain, NULL, hInst, NULL);
+
+}
 
 
 
@@ -3776,7 +6676,7 @@ LRESULT CALLBACK AboutWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam
 
         RECT rtTitle = { 86, 20, rc.right - 28, 56 };
 
-        DrawTextW(hdc, L"Kova Code Studio v1.0.0", -1, &rtTitle, DT_LEFT | DT_SINGLELINE);
+        DrawTextW(hdc, L"Kova Code Studio v1.3.0", -1, &rtTitle, DT_LEFT | DT_SINGLELINE);
 
 
 
@@ -3786,7 +6686,7 @@ LRESULT CALLBACK AboutWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam
 
         RECT rtSub = { 86, 52, rc.right - 28, 78 };
 
-        DrawTextW(hdc, L"Release Build 1.0.0  |  Разработчик: ANR1S", -1, &rtSub, DT_LEFT | DT_SINGLELINE);
+        DrawTextW(hdc, L"Release Build 1.3.0  |  Разработчик: ANR1S", -1, &rtSub, DT_LEFT | DT_SINGLELINE);
 
 
 
@@ -3794,47 +6694,59 @@ LRESULT CALLBACK AboutWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam
 
         SetTextColor(hdc, isDarkTheme ? RGB(205, 205, 218) : RGB(50, 50, 60));
 
-        RECT rtDesc = { 28, 92, rc.right - 28, rc.bottom - 65 };
+        RECT rtDesc = { 28, 90, rc.right - 28, rc.bottom - 62 };
 
         const wchar_t* aboutText =
 
             L"Молниеносная нативная среда разработки (C++ Win32 API / Scintilla).\n"
 
-            L"Создана специально для профессионального скриптинга SourcePawn (CS:S v34),\n"
+            L"Создана специально для профессионального скриптинга SourcePawn (CS:S / CS:GO),\n"
 
-            L"разработки Python-утилит и верстки Web-модулей.\n\n"
+            L"разработки Python-утилит, конфигов KeyValues (.cfg/.vdf) и Web-модулей.\n\n"
 
-            L"Ключевые возможности:\n"
+            L"Ключевые возможности v1.3.0:\n"
 
-            L" • Собственный высокоскоростной лексер с палитрой VS Code Dark+ и Code Folding\n"
+            L" • Встроенный FTP-менеджер: прямое открытие/редактирование файлов и выгрузка .smx (F6)\n"
 
-            L" • Smart Run (F5): сборка в .smx рядом с исходником + прыжок к ошибке по клику\n"
+            L" • Автопоиск spcomp64/spcomp + автоподключение include и маркеры ошибок\n"
 
-            L" • Встроенная палитра MoreColors + генератор кода (Ctrl+M) и сохранение сессии\n"
+            L" • Автодополнение SourceMod API (Ctrl+Space), автоформатирование (Shift+Alt+F)\n"
 
-            L" • Git-индикаторы модификации строк (оранжевый — изменено, зеленый — сохранено)\n\n"
+            L" • Боковая панель «Структура кода» (Ctrl+B), подсветка вхождений и мультикурсор (Ctrl+Shift+L)\n"
 
-            L"Список изменений v1.0.0 Release:\n"
+            L" • 5 тем оформления, палитра MoreColors + 9 шаблонов (Ctrl+M), защита вкладок\n"
 
-            L" • Плавное масштабирование окна без артефактов (DeferWindowPos)\n"
-
-            L" • Нативный рендер вкладок с меню ПКМ и сохранение открытых файлов при выходе";
+            L" • Поиск/замена (Aa), перенос строк (Alt+Z), сворачивание кода (Ctrl+Shift+[/])";
 
         DrawTextW(hdc, aboutText, -1, &rtDesc, DT_LEFT | DT_WORDBREAK);
 
 
 
-        RECT rcBtn = { (rc.right - 160) / 2, rc.bottom - 52, (rc.right + 160) / 2, rc.bottom - 18 };
+        RECT rcLogBtn = { rc.right / 2 - 170, rc.bottom - 52, rc.right / 2 - 10, rc.bottom - 18 };
+
+        RECT rcBtn = { rc.right / 2 + 10, rc.bottom - 52, rc.right / 2 + 170, rc.bottom - 18 };
+
+
+
+        HBRUSH hbrLog = CreateSolidBrush(g_hoverAboutLogBtn ? pal.uiTabHover : (isDarkTheme ? pal.uiTabInactive : RGB(215, 215, 226)));
+
+        FillRect(hdc, &rcLogBtn, hbrLog);
+
+        DeleteObject(hbrLog);
+
+        SelectObject(hdc, hUIBoldFont);
+
+        SetTextColor(hdc, isDarkTheme ? RGB(255, 255, 255) : RGB(20, 20, 30));
+
+        DrawTextW(hdc, L"Лог обновлений", -1, &rcLogBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+
 
         HBRUSH hbrBtn = CreateSolidBrush(g_hoverAboutCloseBtn ? RGB(145, 80, 255) : pal.uiAccent);
 
         FillRect(hdc, &rcBtn, hbrBtn);
 
         DeleteObject(hbrBtn);
-
-
-
-        SelectObject(hdc, hUIBoldFont);
 
         SetTextColor(hdc, RGB(255, 255, 255));
 
@@ -3858,15 +6770,23 @@ LRESULT CALLBACK AboutWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam
 
         GetClientRect(hwnd, &rc);
 
-        RECT rcBtn = { (rc.right - 160) / 2, rc.bottom - 52, (rc.right + 160) / 2, rc.bottom - 18 };
+        RECT rcLogBtn = { rc.right / 2 - 170, rc.bottom - 52, rc.right / 2 - 10, rc.bottom - 18 };
 
-        bool hov = PtInRect(&rcBtn, pt) != 0;
+        RECT rcBtn = { rc.right / 2 + 10, rc.bottom - 52, rc.right / 2 + 170, rc.bottom - 18 };
 
-        if (hov != g_hoverAboutCloseBtn) {
+        bool hovClose = PtInRect(&rcBtn, pt) != 0;
 
-            g_hoverAboutCloseBtn = hov;
+        bool hovLog = PtInRect(&rcLogBtn, pt) != 0;
 
-            InvalidateRect(hwnd, &rcBtn, FALSE);
+        if (hovClose != g_hoverAboutCloseBtn || hovLog != g_hoverAboutLogBtn) {
+
+            g_hoverAboutCloseBtn = hovClose;
+
+            g_hoverAboutLogBtn = hovLog;
+
+            RECT rBtns = { 0, rc.bottom - 56, rc.right, rc.bottom };
+
+            InvalidateRect(hwnd, &rBtns, FALSE);
 
         }
 
@@ -3882,7 +6802,17 @@ LRESULT CALLBACK AboutWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam
 
         GetClientRect(hwnd, &rc);
 
-        RECT rcBtn = { (rc.right - 160) / 2, rc.bottom - 52, (rc.right + 160) / 2, rc.bottom - 18 };
+        RECT rcLogBtn = { rc.right / 2 - 170, rc.bottom - 52, rc.right / 2 - 10, rc.bottom - 18 };
+
+        RECT rcBtn = { rc.right / 2 + 10, rc.bottom - 52, rc.right / 2 + 170, rc.bottom - 18 };
+
+        if (PtInRect(&rcLogBtn, pt)) {
+
+            ShowChangelogWindow();
+
+            return 0;
+
+        }
 
         if (PtInRect(&rcBtn, pt)) {
 
@@ -3944,7 +6874,7 @@ void ShowAboutWindow() {
 
 
 
-    int w = 560, h = 435;
+    int w = 590, h = 445;
 
     RECT rcMain;
 
@@ -3966,6 +6896,1432 @@ void ShowAboutWindow() {
 
 // ============================================================
 
+//  ВСТРОЕННЫЙ FTP-МЕНЕДЖЕР (WININET)
+
+// ============================================================
+
+void OpenPath(const wchar_t* path);
+
+void SaveCurrentFile(bool forceSaveAs);
+
+void RunSmartDispatcher();
+
+
+
+struct FtpEntry {
+
+    std::wstring name;
+
+    bool isDir;
+
+    ULONGLONG size;
+
+    FILETIME mtime;
+
+};
+
+
+
+std::vector<FtpEntry> g_ftpEntries;
+
+HWND hComboFtpProfiles = NULL;
+
+HWND hEditFtpHost = NULL, hEditFtpPort = NULL, hEditFtpUser = NULL, hEditFtpPass = NULL, hEditFtpDir = NULL, hEditFtpNewDir = NULL;
+
+HWND hListFtp = NULL;
+
+HFONT hFtpListFont = NULL;
+
+std::wstring g_ftpStatusText = L"Статус: Отключен";
+
+
+
+static std::wstring SanitizeFtpFileName(const std::wstring& raw) {
+
+    size_t pos = raw.find_last_of(L"\\/");
+
+    std::wstring name = (pos == std::wstring::npos) ? raw : raw.substr(pos + 1);
+
+    std::wstring clean;
+
+    for (wchar_t c : name) {
+
+        if (c == L'<' || c == L'>' || c == L':' || c == L'"' || c == L'|' || c == L'?' || c == L'*' || c < 32) continue;
+
+        clean.push_back(c);
+
+    }
+
+    if (clean == L"." || clean == L"..") return L"";
+
+    return clean;
+
+}
+
+
+
+static void NormalizeFtpHost(wchar_t* hostBuf, size_t maxLen) {
+
+    std::wstring s = hostBuf;
+
+    while (!s.empty() && (s.front() == L' ' || s.front() == L'\t')) s.erase(s.begin());
+
+    while (!s.empty() && (s.back() == L' ' || s.back() == L'\t' || s.back() == L'/')) s.pop_back();
+
+    if (_wcsnicmp(s.c_str(), L"ftp://", 6) == 0) s = s.substr(6);
+
+    size_t slash = s.find(L'/');
+
+    if (slash != std::wstring::npos) s = s.substr(0, slash);
+
+    wcsncpy_s(hostBuf, maxLen, s.c_str(), _TRUNCATE);
+
+}
+
+
+
+static void FtpReportError(const wchar_t* prefix) {
+
+    DWORD err = GetLastError();
+
+    wchar_t extBuf[512] = { 0 };
+
+    DWORD extLen = 511;
+
+    DWORD extErr = 0;
+
+    std::wstring msg = std::wstring(L"[FTP ОШИБКА] ") + prefix + L" (код " + std::to_wstring(err) + L")";
+
+    if (err == ERROR_INTERNET_EXTENDED_ERROR && InternetGetLastResponseInfoW(&extErr, extBuf, &extLen) && extLen > 0) {
+
+        msg += L": ";
+
+        msg += extBuf;
+
+    }
+
+    g_ftpStatusText = msg;
+
+    LogToConsoleW(msg.c_str(), LOG_ERROR);
+
+    if (hwndFtpDlg) InvalidateRect(hwndFtpDlg, NULL, FALSE);
+
+}
+
+
+
+void FtpDisconnect() {
+
+    if (g_hFtp) { InternetCloseHandle(g_hFtp); g_hFtp = NULL; }
+
+    if (g_hInet) { InternetCloseHandle(g_hInet); g_hInet = NULL; }
+
+    g_ftpEntries.clear();
+
+    if (hListFtp) ListView_DeleteAllItems(hListFtp);
+
+    g_ftpStatusText = L"Статус: Отключен";
+
+    if (hwndFtpDlg) InvalidateRect(hwndFtpDlg, NULL, FALSE);
+
+}
+
+
+
+static int GetSystemFileIconIndex(const std::wstring& name, bool isDir) {
+
+    SHFILEINFOW sfi = { 0 };
+
+    DWORD attrs = isDir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+
+    LPCWSTR probe = isDir ? L"folder" : name.c_str();
+
+    if (SHGetFileInfoW(probe, attrs, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES)) {
+
+        return sfi.iIcon;
+
+    }
+
+    return -1;
+
+}
+
+
+
+void FtpRefreshProfilesCombo(int selectIdx = -1) {
+
+    if (!hComboFtpProfiles) return;
+
+    SendMessageW(hComboFtpProfiles, CB_RESETCONTENT, 0, 0);
+
+    for (size_t i = 0; i < g_ftpProfiles.size(); i++) {
+
+        std::wstring label = std::to_wstring(i + 1) + L". " + g_ftpProfiles[i].name;
+
+        SendMessageW(hComboFtpProfiles, CB_ADDSTRING, 0, (LPARAM)label.c_str());
+
+    }
+
+    if (selectIdx >= 0 && selectIdx < (int)g_ftpProfiles.size()) {
+
+        SendMessageW(hComboFtpProfiles, CB_SETCURSEL, (WPARAM)selectIdx, 0);
+
+    }
+
+    else if (!g_ftpProfiles.empty()) {
+
+        SendMessageW(hComboFtpProfiles, CB_SETCURSEL, 0, 0);
+
+    }
+
+}
+
+
+
+void FtpApplySelectedProfile() {
+
+    if (!hComboFtpProfiles) return;
+
+    int sel = (int)SendMessageW(hComboFtpProfiles, CB_GETCURSEL, 0, 0);
+
+    if (sel < 0 || sel >= (int)g_ftpProfiles.size()) return;
+
+    const FtpProfile& p = g_ftpProfiles[sel];
+
+    wcscpy_s(szFtpHost, p.host.c_str());
+
+    g_ftpPort = p.port;
+
+    wcscpy_s(szFtpUser, p.user.c_str());
+
+    wcscpy_s(szFtpPass, p.pass.c_str());
+
+    wcscpy_s(szFtpRemoteDir, p.remoteDir.c_str());
+
+    g_ftpPassive = p.passive;
+
+
+
+    wchar_t portStr[16];
+
+    swprintf(portStr, 16, L"%d", g_ftpPort);
+
+    if (hEditFtpHost) SetWindowTextW(hEditFtpHost, szFtpHost);
+
+    if (hEditFtpPort) SetWindowTextW(hEditFtpPort, portStr);
+
+    if (hEditFtpUser) SetWindowTextW(hEditFtpUser, szFtpUser);
+
+    if (hEditFtpPass) SetWindowTextW(hEditFtpPass, szFtpPass);
+
+    if (hEditFtpDir) SetWindowTextW(hEditFtpDir, szFtpRemoteDir);
+
+    if (hwndFtpDlg) InvalidateRect(hwndFtpDlg, NULL, FALSE);
+
+}
+
+
+
+void FtpSaveCurrentProfile() {
+
+    if (!hwndFtpDlg) return;
+
+    if (hEditFtpHost) GetWindowTextW(hEditFtpHost, szFtpHost, 128);
+
+    NormalizeFtpHost(szFtpHost, 128);
+
+    if (hEditFtpHost) SetWindowTextW(hEditFtpHost, szFtpHost);
+
+    if (wcslen(szFtpHost) == 0) {
+
+        g_ftpStatusText = L"Введите хост перед сохранением профиля!";
+
+        InvalidateRect(hwndFtpDlg, NULL, FALSE);
+
+        return;
+
+    }
+
+    if (hEditFtpPort) {
+
+        wchar_t pb[16] = { 0 };
+
+        GetWindowTextW(hEditFtpPort, pb, 16);
+
+        g_ftpPort = _wtoi(pb);
+
+        if (g_ftpPort <= 0 || g_ftpPort > 65535) g_ftpPort = 21;
+
+    }
+
+    if (hEditFtpUser) GetWindowTextW(hEditFtpUser, szFtpUser, 128);
+
+    if (hEditFtpPass) GetWindowTextW(hEditFtpPass, szFtpPass, 128);
+
+    if (hEditFtpDir) GetWindowTextW(hEditFtpDir, szFtpRemoteDir, 512);
+
+
+
+    FtpProfile prof;
+
+    prof.host = szFtpHost;
+
+    prof.port = g_ftpPort;
+
+    prof.user = szFtpUser;
+
+    prof.pass = szFtpPass;
+
+    prof.remoteDir = (wcslen(szFtpRemoteDir) > 0) ? szFtpRemoteDir : L"/";
+
+    prof.passive = g_ftpPassive;
+
+    prof.name = (prof.user.empty() ? L"" : prof.user + L"@") + prof.host + L":" + std::to_wstring(prof.port);
+
+
+
+    int targetIdx = -1;
+
+    for (int i = 0; i < (int)g_ftpProfiles.size(); i++) {
+
+        if (_wcsicmp(g_ftpProfiles[i].host.c_str(), prof.host.c_str()) == 0 &&
+
+            g_ftpProfiles[i].port == prof.port &&
+
+            _wcsicmp(g_ftpProfiles[i].user.c_str(), prof.user.c_str()) == 0) {
+
+            g_ftpProfiles[i] = prof;
+
+            targetIdx = i;
+
+            break;
+
+        }
+
+    }
+
+    if (targetIdx < 0) {
+
+        if ((int)g_ftpProfiles.size() >= MAX_FTP_PROFILES) {
+
+            MessageBoxW(hwndFtpDlg,
+
+                L"Достигнут лимит сохраненных подключений (максимум 8).\nУдалите один из старых профилей.",
+
+                L"FTP-менеджер", MB_OK | MB_ICONINFORMATION);
+
+            return;
+
+        }
+
+        g_ftpProfiles.push_back(prof);
+
+        targetIdx = (int)g_ftpProfiles.size() - 1;
+
+    }
+
+
+
+    SaveConfig();
+
+    FtpRefreshProfilesCombo(targetIdx);
+
+    g_ftpStatusText = std::wstring(L"Профиль сохранен (") + std::to_wstring(g_ftpProfiles.size()) + L"/8): " + prof.name;
+
+    LogToConsoleW((std::wstring(L"> [FTP] Сохранен профиль: ") + prof.name).c_str(), LOG_SUCCESS);
+
+    InvalidateRect(hwndFtpDlg, NULL, FALSE);
+
+}
+
+
+
+void FtpDeleteSelectedProfile() {
+
+    if (!hComboFtpProfiles) return;
+
+    int sel = (int)SendMessageW(hComboFtpProfiles, CB_GETCURSEL, 0, 0);
+
+    if (sel < 0 || sel >= (int)g_ftpProfiles.size()) return;
+
+    std::wstring removed = g_ftpProfiles[sel].name;
+
+    g_ftpProfiles.erase(g_ftpProfiles.begin() + sel);
+
+    SaveConfig();
+
+    FtpRefreshProfilesCombo(sel > 0 ? sel - 1 : 0);
+
+    g_ftpStatusText = L"Удален профиль: " + removed;
+
+    InvalidateRect(hwndFtpDlg, NULL, FALSE);
+
+}
+
+
+
+void FtpRefreshList() {
+
+    if (!g_hFtp || !hListFtp) return;
+
+    wchar_t curDir[512] = L"/";
+
+    DWORD curLen = 511;
+
+    if (FtpGetCurrentDirectoryW(g_hFtp, curDir, &curLen)) {
+
+        wcscpy_s(szFtpRemoteDir, curDir);
+
+        if (hEditFtpDir) SetWindowTextW(hEditFtpDir, szFtpRemoteDir);
+
+    }
+
+
+
+    g_ftpEntries.clear();
+
+    ListView_DeleteAllItems(hListFtp);
+
+
+
+    if (wcscmp(szFtpRemoteDir, L"/") != 0 && wcslen(szFtpRemoteDir) > 0) {
+
+        FtpEntry up = { L"..", true, 0, {0,0} };
+
+        g_ftpEntries.push_back(up);
+
+    }
+
+
+
+    WIN32_FIND_DATAW fd = { 0 };
+
+    HINTERNET hFind = FtpFindFirstFileW(g_hFtp, L"*", &fd, INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE, 0);
+
+    if (hFind) {
+
+        std::vector<FtpEntry> dirs, files;
+
+        do {
+
+            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+
+            FtpEntry e;
+
+            e.name = fd.cFileName;
+
+            e.isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+            e.size = ((ULONGLONG)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+
+            e.mtime = fd.ftLastWriteTime;
+
+            if (e.isDir) dirs.push_back(e);
+
+            else files.push_back(e);
+
+        } while (InternetFindNextFileW(hFind, &fd));
+
+        InternetCloseHandle(hFind);
+
+
+
+        auto cmpName = [](const FtpEntry& a, const FtpEntry& b) {
+
+            return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0;
+
+        };
+
+        std::sort(dirs.begin(), dirs.end(), cmpName);
+
+        std::sort(files.begin(), files.end(), cmpName);
+
+
+
+        for (const auto& d : dirs) g_ftpEntries.push_back(d);
+
+        for (const auto& f : files) g_ftpEntries.push_back(f);
+
+    }
+
+
+
+    for (int i = 0; i < (int)g_ftpEntries.size(); i++) {
+
+        const FtpEntry& e = g_ftpEntries[i];
+
+        LVITEMW lvi = { 0 };
+
+        lvi.mask = LVIF_TEXT | LVIF_IMAGE;
+
+        lvi.iItem = i;
+
+        lvi.iSubItem = 0;
+
+        std::wstring dispName = (e.name == L"..") ? L".. (Наверх)" : e.name;
+
+        lvi.pszText = (LPWSTR)dispName.c_str();
+
+        lvi.iImage = GetSystemFileIconIndex(e.name, e.isDir);
+
+        ListView_InsertItem(hListFtp, &lvi);
+
+
+
+        std::wstring typeStr = L"Файл";
+
+        if (e.name == L"..") typeStr = L"Переход вверх";
+
+        else if (e.isDir) typeStr = L"Папка";
+
+        else {
+
+            size_t dot = e.name.find_last_of(L'.');
+
+            if (dot != std::wstring::npos && dot + 1 < e.name.size()) {
+
+                std::wstring ext = e.name.substr(dot + 1);
+
+                std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t c) { return (wchar_t)towupper(c); });
+
+                typeStr = L"Файл ." + ext;
+
+            }
+
+        }
+
+        ListView_SetItemText(hListFtp, i, 1, (LPWSTR)typeStr.c_str());
+
+
+
+        std::wstring sizeStr = L"<DIR>";
+
+        if (!e.isDir) {
+
+            wchar_t szBuf[64];
+
+            if (e.size < 1024) swprintf(szBuf, 64, L"%llu Б", e.size);
+
+            else if (e.size < 1024 * 1024) swprintf(szBuf, 64, L"%.1f КБ", e.size / 1024.0);
+
+            else swprintf(szBuf, 64, L"%.2f МБ", e.size / (1024.0 * 1024.0));
+
+            sizeStr = szBuf;
+
+        }
+
+        ListView_SetItemText(hListFtp, i, 2, (LPWSTR)sizeStr.c_str());
+
+
+
+        std::wstring dateStr = L"—";
+
+        if (e.mtime.dwHighDateTime != 0 || e.mtime.dwLowDateTime != 0) {
+
+            FILETIME lft = { 0 };
+
+            SYSTEMTIME st = { 0 };
+
+            if (FileTimeToLocalFileTime(&e.mtime, &lft) && FileTimeToSystemTime(&lft, &st)) {
+
+                wchar_t dtBuf[64];
+
+                swprintf(dtBuf, 64, L"%02d.%02d.%04d %02d:%02d", st.wDay, st.wMonth, st.wYear, st.wHour, st.wMinute);
+
+                dateStr = dtBuf;
+
+            }
+
+        }
+
+        ListView_SetItemText(hListFtp, i, 3, (LPWSTR)dateStr.c_str());
+
+    }
+
+
+
+    g_ftpStatusText = std::wstring(L"Подключен: ") + szFtpHost + L"  |  " + szFtpRemoteDir + L"  (" + std::to_wstring(g_ftpEntries.size()) + L" эл.)";
+
+    if (hwndFtpDlg) InvalidateRect(hwndFtpDlg, NULL, FALSE);
+
+}
+
+
+
+bool FtpConnect(bool readFromInputs) {
+
+    if (readFromInputs && hwndFtpDlg) {
+
+        if (hEditFtpHost) GetWindowTextW(hEditFtpHost, szFtpHost, 128);
+
+        NormalizeFtpHost(szFtpHost, 128);
+
+        if (hEditFtpHost) SetWindowTextW(hEditFtpHost, szFtpHost);
+
+        if (hEditFtpPort) {
+
+            wchar_t pBuf[16] = { 0 };
+
+            GetWindowTextW(hEditFtpPort, pBuf, 16);
+
+            g_ftpPort = _wtoi(pBuf);
+
+            if (g_ftpPort <= 0 || g_ftpPort > 65535) g_ftpPort = 21;
+
+        }
+
+        if (hEditFtpUser) GetWindowTextW(hEditFtpUser, szFtpUser, 128);
+
+        if (hEditFtpPass) GetWindowTextW(hEditFtpPass, szFtpPass, 128);
+
+        if (hEditFtpDir) GetWindowTextW(hEditFtpDir, szFtpRemoteDir, 512);
+
+    }
+
+    if (wcslen(szFtpHost) == 0) {
+
+        g_ftpStatusText = L"Укажите адрес хоста FTP!";
+
+        LogToConsoleW(L"[FTP] Укажите хост сервера.", LOG_WARNING);
+
+        if (hwndFtpDlg) InvalidateRect(hwndFtpDlg, NULL, FALSE);
+
+        return false;
+
+    }
+
+
+
+    FtpDisconnect();
+
+    SaveConfig();
+
+
+
+    g_hInet = InternetOpenW(L"KovaCodeFTP/1.3", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+
+    if (!g_hInet) {
+
+        FtpReportError(L"Не удалось инициализировать WinINet");
+
+        return false;
+
+    }
+
+    DWORD timeout = 8000;
+
+    InternetSetOptionW(g_hInet, INTERNET_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+
+
+
+    const wchar_t* userPtr = (wcslen(szFtpUser) > 0) ? szFtpUser : NULL;
+
+    const wchar_t* passPtr = (wcslen(szFtpPass) > 0) ? szFtpPass : NULL;
+
+    g_hFtp = InternetConnectW(g_hInet, szFtpHost, (INTERNET_PORT)g_ftpPort, userPtr, passPtr,
+
+        INTERNET_SERVICE_FTP, g_ftpPassive ? INTERNET_FLAG_PASSIVE : 0, 0);
+
+    if (!g_hFtp) {
+
+        FtpReportError(L"Не удалось подключиться к FTP");
+
+        FtpDisconnect();
+
+        return false;
+
+    }
+
+
+
+    if (wcslen(szFtpRemoteDir) > 0 && wcscmp(szFtpRemoteDir, L"/") != 0) {
+
+        FtpSetCurrentDirectoryW(g_hFtp, szFtpRemoteDir);
+
+    }
+
+    LogToConsoleW((std::wstring(L"> [FTP] Подключено к ") + szFtpHost + L":" + std::to_wstring(g_ftpPort)).c_str(), LOG_SUCCESS);
+
+    if (hListFtp) FtpRefreshList();
+
+    return true;
+
+}
+
+
+
+bool FtpUploadLocalFile(const std::wstring& localPath, const std::wstring& remotePathOrName) {
+
+    if (!g_hFtp && !FtpConnect(false)) return false;
+
+    if (FtpPutFileW(g_hFtp, localPath.c_str(), remotePathOrName.c_str(), FTP_TRANSFER_TYPE_BINARY | INTERNET_FLAG_RELOAD, 0)) {
+
+        LogToConsoleW((std::wstring(L"> [FTP] Выгружен на сервер: ") + remotePathOrName).c_str(), LOG_SUCCESS);
+
+        if (hwndFtpDlg && hListFtp) FtpRefreshList();
+
+        return true;
+
+    }
+
+    FtpReportError(L"Ошибка выгрузки файла на FTP");
+
+    return false;
+
+}
+
+
+
+void FtpUploadActiveTab() {
+
+    if (currentTab < 0) return;
+
+    if (tabs[currentTab].filePath.find(L"Новый файл") != std::wstring::npos || SendActive(SCI_GETMODIFY)) {
+
+        SaveCurrentFile(false);
+
+        if (tabs[currentTab].filePath.find(L"Новый файл") != std::wstring::npos) return;
+
+    }
+
+    if (!g_hFtp && !FtpConnect(true)) return;
+
+
+
+    const std::wstring& localPath = tabs[currentTab].filePath;
+
+    const wchar_t* fn = wcsrchr(localPath.c_str(), L'\\');
+
+    fn = fn ? fn + 1 : localPath.c_str();
+
+
+
+    std::wstring targetRemote = tabs[currentTab].ftpRemotePath.empty() ? std::wstring(fn) : tabs[currentTab].ftpRemotePath;
+
+    FtpUploadLocalFile(localPath, targetRemote);
+
+}
+
+
+
+void FtpDownloadAndOpenSelected() {
+
+    if (!g_hFtp || !hListFtp) return;
+
+    int sel = ListView_GetNextItem(hListFtp, -1, LVNI_SELECTED);
+
+    if (sel < 0 || sel >= (int)g_ftpEntries.size()) return;
+
+    const FtpEntry& e = g_ftpEntries[sel];
+
+    if (e.isDir) {
+
+        if (FtpSetCurrentDirectoryW(g_hFtp, e.name.c_str())) {
+
+            FtpRefreshList();
+
+        }
+
+        else {
+
+            FtpReportError(L"Не удалось открыть папку");
+
+        }
+
+        return;
+
+    }
+
+
+
+    std::wstring safeName = SanitizeFtpFileName(e.name);
+
+    if (safeName.empty()) {
+
+        LogToConsoleW(L"[FTP ОШИБКА] Небезопасное имя файла отклонено.", LOG_ERROR);
+
+        return;
+
+    }
+
+
+
+    std::wstring cacheDir = std::wstring(szExeDir) + L"ftp_cache\\";
+
+    CreateDirectoryW(cacheDir.c_str(), NULL);
+
+    std::wstring localPath = cacheDir + safeName;
+
+
+
+    if (FtpGetFileW(g_hFtp, e.name.c_str(), localPath.c_str(), FALSE, FILE_ATTRIBUTE_NORMAL,
+
+        FTP_TRANSFER_TYPE_BINARY | INTERNET_FLAG_RELOAD, 0)) {
+
+        OpenPath(localPath.c_str());
+
+        if (currentTab >= 0) {
+
+            std::wstring rem = szFtpRemoteDir;
+
+            while (!rem.empty() && rem.back() == L'/') rem.pop_back();
+
+            rem += L"/" + e.name;
+
+            tabs[currentTab].ftpRemotePath = rem;
+
+        }
+
+        LogToConsoleW((std::wstring(L"> [FTP] Скачан и открыт файл: ") + e.name).c_str(), LOG_SUCCESS);
+
+    }
+
+    else {
+
+        FtpReportError(L"Не удалось скачать файл с FTP");
+
+    }
+
+}
+
+
+
+void FtpDeleteSelectedItem(HWND owner) {
+
+    if (!g_hFtp || !hListFtp) return;
+
+    int sel = ListView_GetNextItem(hListFtp, -1, LVNI_SELECTED);
+
+    if (sel < 0 || sel >= (int)g_ftpEntries.size() || g_ftpEntries[sel].name == L"..") return;
+
+    const FtpEntry& e = g_ftpEntries[sel];
+
+    std::wstring q = std::wstring(L"Удалить на FTP: «") + e.name + L"»?";
+
+    if (MessageBoxW(owner, q.c_str(), L"FTP-менеджер", MB_YESNO | MB_ICONWARNING) == IDYES) {
+
+        BOOL ok = e.isDir ? FtpRemoveDirectoryW(g_hFtp, e.name.c_str()) : FtpDeleteFileW(g_hFtp, e.name.c_str());
+
+        if (ok) {
+
+            LogToConsoleW((std::wstring(L"> [FTP] Удалено: ") + e.name).c_str(), LOG_WARNING);
+
+            FtpRefreshList();
+
+        }
+
+        else FtpReportError(L"Не удалось удалить на FTP");
+
+    }
+
+}
+
+
+
+void RunSmartAndUploadSmx() {
+
+    if (currentTab < 0) return;
+
+    RunSmartDispatcher();
+
+    std::wstring file = tabs[currentTab].filePath;
+
+    if (GetLang(file) != LANG_SP) return;
+
+    std::wstring outSmx = file;
+
+    size_t dot = outSmx.find_last_of(L'.');
+
+    if (dot == std::wstring::npos) return;
+
+    outSmx = outSmx.substr(0, dot) + L".smx";
+
+    if (GetFileAttributesW(outSmx.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+
+
+
+    const wchar_t* fn = wcsrchr(outSmx.c_str(), L'\\');
+
+    fn = fn ? fn + 1 : outSmx.c_str();
+
+    if (!g_hFtp && wcslen(szFtpHost) == 0) {
+
+        LogToConsoleW(L"[FTP] Настройте подключение в FTP-менеджере для выгрузки .smx.", LOG_WARNING);
+
+        return;
+
+    }
+
+    FtpUploadLocalFile(outSmx, fn);
+
+}
+
+
+
+LRESULT CALLBACK FtpDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+
+    switch (uMsg) {
+
+    case WM_CREATE: {
+
+        ApplyDwmDarkTitleBar(hwnd, isDarkTheme);
+
+        Pal pal = GetPalette();
+
+        if (hDarkEditBrush) DeleteObject(hDarkEditBrush);
+
+        hDarkEditBrush = CreateSolidBrush(isDarkTheme ? pal.uiTabInactive : RGB(255, 255, 255));
+
+
+
+        INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES };
+
+        InitCommonControlsEx(&icc);
+
+
+
+        hComboFtpProfiles = CreateWindowExW(0, L"COMBOBOX", L"",
+
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+
+            84, 38, 304, 220, hwnd, (HMENU)308, hInst, NULL);
+
+
+
+        wchar_t portStr[16];
+
+        swprintf(portStr, 16, L"%d", g_ftpPort);
+
+
+
+        hEditFtpHost = CreateWindowExW(0, L"EDIT", szFtpHost, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+
+            62, 72, 185, 24, hwnd, (HMENU)301, hInst, NULL);
+
+        hEditFtpPort = CreateWindowExW(0, L"EDIT", portStr, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL,
+
+            295, 72, 54, 24, hwnd, (HMENU)302, hInst, NULL);
+
+        hEditFtpUser = CreateWindowExW(0, L"EDIT", szFtpUser, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+
+            405, 72, 110, 24, hwnd, (HMENU)303, hInst, NULL);
+
+        hEditFtpPass = CreateWindowExW(0, L"EDIT", szFtpPass, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_PASSWORD | ES_AUTOHSCROLL,
+
+            574, 72, 108, 24, hwnd, (HMENU)304, hInst, NULL);
+
+
+
+        hEditFtpDir = CreateWindowExW(0, L"EDIT", szFtpRemoteDir, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+
+            62, 104, 290, 24, hwnd, (HMENU)306, hInst, NULL);
+
+        hEditFtpNewDir = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+
+            510, 138, 108, 24, hwnd, (HMENU)307, hInst, NULL);
+
+
+
+        hListFtp = CreateWindowExW(0, WC_LISTVIEWW, L"",
+
+            WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS,
+
+            16, 172, 666, 304, hwnd, (HMENU)305, hInst, NULL);
+
+
+
+        ListView_SetExtendedListViewStyle(hListFtp, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+
+        ListView_SetBkColor(hListFtp, isDarkTheme ? pal.bg : RGB(255, 255, 255));
+
+        ListView_SetTextBkColor(hListFtp, isDarkTheme ? pal.bg : RGB(255, 255, 255));
+
+        ListView_SetTextColor(hListFtp, isDarkTheme ? pal.fg : RGB(20, 20, 25));
+
+
+
+        SHFILEINFOW sfi = { 0 };
+
+        HIMAGELIST hSysImg = (HIMAGELIST)SHGetFileInfoW(L"C:\\", 0, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+
+        if (hSysImg) ListView_SetImageList(hListFtp, hSysImg, LVSIL_SMALL);
+
+
+
+        LVCOLUMNW col = { 0 };
+
+        col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
+
+        col.fmt = LVCFMT_LEFT;
+
+        col.cx = 290; col.pszText = (LPWSTR)L"Имя"; ListView_InsertColumn(hListFtp, 0, &col);
+
+        col.cx = 115; col.pszText = (LPWSTR)L"Тип"; ListView_InsertColumn(hListFtp, 1, &col);
+
+        col.fmt = LVCFMT_RIGHT;
+
+        col.cx = 95;  col.pszText = (LPWSTR)L"Размер"; ListView_InsertColumn(hListFtp, 2, &col);
+
+        col.fmt = LVCFMT_LEFT;
+
+        col.cx = 142; col.pszText = (LPWSTR)L"Изменён"; ListView_InsertColumn(hListFtp, 3, &col);
+
+
+
+        if (hFtpListFont) DeleteObject(hFtpListFont);
+
+        hFtpListFont = CreateFontW(15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+
+        SendMessageW(hComboFtpProfiles, WM_SETFONT, (WPARAM)hUIFont, TRUE);
+
+        SendMessageW(hEditFtpHost, WM_SETFONT, (WPARAM)hUIFont, TRUE);
+
+        SendMessageW(hEditFtpPort, WM_SETFONT, (WPARAM)hUIFont, TRUE);
+
+        SendMessageW(hEditFtpUser, WM_SETFONT, (WPARAM)hUIFont, TRUE);
+
+        SendMessageW(hEditFtpPass, WM_SETFONT, (WPARAM)hUIFont, TRUE);
+
+        SendMessageW(hEditFtpDir, WM_SETFONT, (WPARAM)hUIFont, TRUE);
+
+        SendMessageW(hEditFtpNewDir, WM_SETFONT, (WPARAM)hUIFont, TRUE);
+
+        SendMessageW(hListFtp, WM_SETFONT, (WPARAM)hFtpListFont, TRUE);
+
+
+
+        FtpRefreshProfilesCombo();
+
+        if (g_hFtp) FtpRefreshList();
+
+        return 0;
+
+    }
+
+    case WM_CTLCOLOREDIT:
+
+    case WM_CTLCOLORLISTBOX: {
+
+        HDC hdc = (HDC)wParam;
+
+        Pal pal = GetPalette();
+
+        SetTextColor(hdc, isDarkTheme ? pal.fg : RGB(15, 15, 20));
+
+        SetBkColor(hdc, isDarkTheme ? pal.uiTabInactive : RGB(255, 255, 255));
+
+        return (LRESULT)hDarkEditBrush;
+
+    }
+
+    case WM_COMMAND: {
+
+        if (LOWORD(wParam) == 308 && HIWORD(wParam) == CBN_SELCHANGE) {
+
+            FtpApplySelectedProfile();
+
+            return 0;
+
+        }
+
+        break;
+
+    }
+
+    case WM_NOTIFY: {
+
+        LPNMHDR pnm = (LPNMHDR)lParam;
+
+        if (pnm->hwndFrom == hListFtp) {
+
+            if (pnm->code == NM_DBLCLK) {
+
+                FtpDownloadAndOpenSelected();
+
+                return 0;
+
+            }
+
+            if (pnm->code == LVN_KEYDOWN) {
+
+                LPNMLVKEYDOWN pk = (LPNMLVKEYDOWN)lParam;
+
+                if (pk->wVKey == VK_RETURN) { FtpDownloadAndOpenSelected(); return 0; }
+
+                if (pk->wVKey == VK_BACK) {
+
+                    if (g_hFtp && FtpSetCurrentDirectoryW(g_hFtp, L"..")) FtpRefreshList();
+
+                    return 0;
+
+                }
+
+                if (pk->wVKey == VK_DELETE) { FtpDeleteSelectedItem(hwnd); return 0; }
+
+            }
+
+        }
+
+        break;
+
+    }
+
+    case WM_PAINT: {
+
+        PAINTSTRUCT ps;
+
+        HDC hdc = BeginPaint(hwnd, &ps);
+
+        RECT rc; GetClientRect(hwnd, &rc);
+
+        Pal pal = GetPalette();
+
+
+
+        HBRUSH hbrBg = CreateSolidBrush(isDarkTheme ? pal.uiTopBar : RGB(242, 242, 247));
+
+        FillRect(hdc, &rc, hbrBg);
+
+        DeleteObject(hbrBg);
+
+
+
+        RECT rcTop = { 0, 0, rc.right, 3 };
+
+        HBRUSH hbrAcc = CreateSolidBrush(pal.uiAccent);
+
+        FillRect(hdc, &rcTop, hbrAcc);
+
+        DeleteObject(hbrAcc);
+
+
+
+        HPEN hPen = CreatePen(PS_SOLID, 1, pal.uiAccent);
+
+        HGDIOBJ oldPen = SelectObject(hdc, hPen);
+
+        HBRUSH oldBr = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+
+        Rectangle(hdc, 0, 0, rc.right, rc.bottom);
+
+        SelectObject(hdc, oldBr);
+
+        SelectObject(hdc, oldPen);
+
+        DeleteObject(hPen);
+
+
+
+        SetBkMode(hdc, TRANSPARENT);
+
+        SelectObject(hdc, hUIBoldFont);
+
+        SetTextColor(hdc, isDarkTheme ? RGB(255, 255, 255) : RGB(20, 20, 25));
+
+        RECT rHdr = { 16, 8, rc.right - 40, 32 };
+
+        DrawTextW(hdc, L"🌐 FTP-менеджер (до 8 сохраненных подключений)", -1, &rHdr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+
+
+        RECT rcCloseX = { rc.right - 34, 8, rc.right - 8, 32 };
+
+        SetTextColor(hdc, RGB(235, 85, 85));
+
+        DrawTextW(hdc, L"✕", -1, &rcCloseX, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+
+
+        SelectObject(hdc, hUIFont);
+
+        SetTextColor(hdc, isDarkTheme ? RGB(190, 190, 205) : RGB(55, 55, 65));
+
+        RECT lProf = { 16, 38, 82, 62 };  DrawTextW(hdc, L"Профиль:", -1, &lProf, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        RECT lHost = { 16, 72, 60, 96 };  DrawTextW(hdc, L"Хост:", -1, &lHost, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        RECT lPort = { 252, 72, 293, 96 }; DrawTextW(hdc, L"Порт:", -1, &lPort, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        RECT lUser = { 354, 72, 403, 96 }; DrawTextW(hdc, L"Логин:", -1, &lUser, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        RECT lPass = { 520, 72, 572, 96 }; DrawTextW(hdc, L"Пароль:", -1, &lPass, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        RECT lDir = { 16, 104, 60, 128 }; DrawTextW(hdc, L"Путь:", -1, &lDir, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+
+
+        struct FBtn { RECT r; const wchar_t* txt; bool accent; bool active; };
+
+        FBtn btns[] = {
+
+            { { 396, 38, 540, 62 },   L"Сохранить профиль", false, false },
+
+            { { 548, 38, 682, 62 },   L"Удалить профиль",   false, false },
+
+            { { 358, 104, 434, 128 }, L"Перейти",      false, false },
+
+            { { 442, 104, 514, 128 }, g_ftpPassive ? L"PASV ✓" : L"PASV", false, g_ftpPassive },
+
+            { { 522, 104, 682, 128 }, g_ftpAutoUploadOnSave ? L"Автовыгрузка Ctrl+S ✓" : L"Автовыгрузка Ctrl+S", false, g_ftpAutoUploadOnSave },
+
+            { { 16, 138, 134, 164 },  g_hFtp ? L"Отключиться" : L"Подключиться", true, false },
+
+            { { 142, 138, 224, 164 }, L"Обновить",     false, false },
+
+            { { 232, 138, 314, 164 }, L"Вверх (..)",   false, false },
+
+            { { 322, 138, 412, 164 }, L"Удалить",      false, false },
+
+            { { 420, 138, 504, 164 }, L"Создать ▸",    false, false },
+
+            { { 624, 138, 682, 164 }, L"Папка",        false, false },
+
+            { { 16, 486, 178, 516 },  L"Скачать и открыть", false, false },
+
+            { { 188, 486, 404, 516 }, L"Отправить текущий файл ↑", true, false },
+
+            { { 414, 486, 682, 516 }, L"Сборка + .smx на FTP (F6)", false, false }
+
+        };
+
+        for (const auto& b : btns) {
+
+            COLORREF bg = b.accent ? pal.uiAccent : (b.active ? RGB(46, 125, 85) : (isDarkTheme ? pal.uiTabHover : RGB(220, 220, 232)));
+
+            HBRUSH hb = CreateSolidBrush(bg);
+
+            FillRect(hdc, &b.r, hb);
+
+            DeleteObject(hb);
+
+            SetTextColor(hdc, (b.accent || b.active || isDarkTheme) ? RGB(255, 255, 255) : RGB(20, 20, 25));
+
+            DrawTextW(hdc, b.txt, -1, (LPRECT)&b.r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        }
+
+
+
+        SelectObject(hdc, hSmallFont);
+
+        SetTextColor(hdc, g_hFtp ? RGB(80, 220, 120) : (isDarkTheme ? RGB(170, 170, 185) : RGB(70, 70, 85)));
+
+        RECT rStat = { 16, 522, rc.right - 16, 546 };
+
+        DrawTextW(hdc, g_ftpStatusText.c_str(), -1, &rStat, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+
+
+        EndPaint(hwnd, &ps);
+
+        return 0;
+
+    }
+
+    case WM_LBUTTONDOWN: {
+
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+
+        RECT rc; GetClientRect(hwnd, &rc);
+
+        RECT rcCloseX = { rc.right - 34, 8, rc.right - 8, 32 };
+
+        if (PtInRect(&rcCloseX, pt)) { DestroyWindow(hwnd); return 0; }
+
+
+
+        RECT rSaveProf = { 396, 38, 540, 62 };
+
+        RECT rDelProf = { 548, 38, 682, 62 };
+
+        RECT rGoDir = { 358, 104, 434, 128 };
+
+        RECT rPasv = { 442, 104, 514, 128 };
+
+        RECT rAuto = { 522, 104, 682, 128 };
+
+        RECT rConn = { 16, 138, 134, 164 };
+
+        RECT rRefr = { 142, 138, 224, 164 };
+
+        RECT rUp = { 232, 138, 314, 164 };
+
+        RECT rDel = { 322, 138, 412, 164 };
+
+        RECT rMkDir1 = { 420, 138, 504, 164 };
+
+        RECT rMkDir2 = { 624, 138, 682, 164 };
+
+        RECT rDown = { 16, 486, 178, 516 };
+
+        RECT rUpAct = { 188, 486, 404, 516 };
+
+        RECT rBuildUp = { 414, 486, 682, 516 };
+
+
+
+        if (PtInRect(&rSaveProf, pt)) { FtpSaveCurrentProfile(); return 0; }
+
+        if (PtInRect(&rDelProf, pt)) { FtpDeleteSelectedProfile(); return 0; }
+
+        if (PtInRect(&rPasv, pt)) { g_ftpPassive = !g_ftpPassive; SaveConfig(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
+
+        if (PtInRect(&rAuto, pt)) { g_ftpAutoUploadOnSave = !g_ftpAutoUploadOnSave; SaveConfig(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
+
+        if (PtInRect(&rConn, pt)) {
+
+            if (g_hFtp) FtpDisconnect();
+
+            else FtpConnect(true);
+
+            return 0;
+
+        }
+
+        if (PtInRect(&rGoDir, pt)) {
+
+            if (g_hFtp && hEditFtpDir) {
+
+                wchar_t d[512] = { 0 };
+
+                GetWindowTextW(hEditFtpDir, d, 512);
+
+                if (FtpSetCurrentDirectoryW(g_hFtp, d)) FtpRefreshList();
+
+                else FtpReportError(L"Не удалось перейти в папку");
+
+            }
+
+            return 0;
+
+        }
+
+        if (PtInRect(&rRefr, pt)) { FtpRefreshList(); return 0; }
+
+        if (PtInRect(&rUp, pt)) {
+
+            if (g_hFtp && FtpSetCurrentDirectoryW(g_hFtp, L"..")) FtpRefreshList();
+
+            return 0;
+
+        }
+
+        if (PtInRect(&rMkDir1, pt) || PtInRect(&rMkDir2, pt)) {
+
+            if (g_hFtp && hEditFtpNewDir) {
+
+                wchar_t nd[128] = { 0 };
+
+                GetWindowTextW(hEditFtpNewDir, nd, 128);
+
+                std::wstring safeDir = SanitizeFtpFileName(nd);
+
+                if (!safeDir.empty()) {
+
+                    if (FtpCreateDirectoryW(g_hFtp, safeDir.c_str())) {
+
+                        SetWindowTextW(hEditFtpNewDir, L"");
+
+                        LogToConsoleW((std::wstring(L"> [FTP] Создана папка: ") + safeDir).c_str(), LOG_SUCCESS);
+
+                        FtpRefreshList();
+
+                    }
+
+                    else FtpReportError(L"Не удалось создать папку");
+
+                }
+
+            }
+
+            return 0;
+
+        }
+
+        if (PtInRect(&rDel, pt)) { FtpDeleteSelectedItem(hwnd); return 0; }
+
+        if (PtInRect(&rDown, pt)) { FtpDownloadAndOpenSelected(); return 0; }
+
+        if (PtInRect(&rUpAct, pt)) { FtpUploadActiveTab(); return 0; }
+
+        if (PtInRect(&rBuildUp, pt)) { RunSmartAndUploadSmx(); return 0; }
+
+
+
+        SendMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+
+        return 0;
+
+    }
+
+    case WM_KEYDOWN:
+
+        if (wParam == VK_ESCAPE) DestroyWindow(hwnd);
+
+        return 0;
+
+    case WM_DESTROY:
+
+        if (hFtpListFont) { DeleteObject(hFtpListFont); hFtpListFont = NULL; }
+
+        hwndFtpDlg = NULL;
+
+        hComboFtpProfiles = hEditFtpHost = hEditFtpPort = hEditFtpUser = hEditFtpPass = hEditFtpDir = hEditFtpNewDir = hListFtp = NULL;
+
+        return 0;
+
+    }
+
+    return DefWindowProcW(hwnd, uMsg, wParam, lParam);
+
+}
+
+
+
+void ShowFtpManagerDialog() {
+
+    if (hwndFtpDlg) {
+
+        SetForegroundWindow(hwndFtpDlg);
+
+        return;
+
+    }
+
+    WNDCLASSW wc = { 0 };
+
+    wc.lpfnWndProc = FtpDlgProc;
+
+    wc.hInstance = hInst;
+
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+
+    wc.lpszClassName = L"KovaFtpMgrCls";
+
+    RegisterClassW(&wc);
+
+
+
+    int w = 698, h = 554;
+
+    RECT rcMain;
+
+    GetWindowRect(hwndMain, &rcMain);
+
+    int x = rcMain.left + (rcMain.right - rcMain.left - w) / 2;
+
+    int y = rcMain.top + (rcMain.bottom - rcMain.top - h) / 2;
+
+    hwndFtpDlg = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"KovaFtpMgrCls", L"",
+
+        WS_POPUP | WS_VISIBLE, x, y, w, h, hwndMain, NULL, hInst, NULL);
+
+}
+
+
+
+// ============================================================
+
 //  МЕНЮ И ТУЛБАР БЫСТРЫХ ДЕЙСТВИЙ
 
 // ============================================================
@@ -3976,21 +8332,25 @@ void InitToolbarButtons() {
 
     g_toolbarButtons.push_back({ IDM_FILE_NEW,          L"+ Новый файл",       { 10,  5, 112, 32 }, false });
 
-    g_toolbarButtons.push_back({ IDM_FILE_OPEN,         L"Открыть",            { 118, 5, 198, 32 }, false });
+    g_toolbarButtons.push_back({ IDM_FILE_OPEN,         L"Открыть",            { 118, 5, 194, 32 }, false });
 
-    g_toolbarButtons.push_back({ IDM_FILE_SAVE,         L"Сохранить",          { 204, 5, 294, 32 }, false });
+    g_toolbarButtons.push_back({ IDM_FILE_SAVE,         L"Сохранить",          { 200, 5, 286, 32 }, false });
 
-    g_toolbarButtons.push_back({ IDM_RUN_SMART,         L"▶ Запуск / Сборка",  { 304, 5, 448, 32 }, true });
+    g_toolbarButtons.push_back({ IDM_RUN_SMART,         L"▶ Запуск / Сборка",  { 294, 5, 434, 32 }, true });
 
-    g_toolbarButtons.push_back({ IDM_SET_COMPILER,      L"⚙ spcomp.exe",       { 456, 5, 562, 32 }, false });
+    g_toolbarButtons.push_back({ IDM_SET_COMPILER,      L"⚙ spcomp",           { 442, 5, 530, 32 }, false });
 
-    g_toolbarButtons.push_back({ IDM_EDIT_SNIPPET_SP,   L"★ Шаблон .SP",       { 570, 5, 678, 32 }, false });
+    g_toolbarButtons.push_back({ IDM_EDIT_SNIPPET_SP,   L"★ Шаблон .SP",       { 536, 5, 640, 32 }, false });
 
-    g_toolbarButtons.push_back({ IDM_EDIT_CHAT_COLORS,  L"🎨 Цвета чата",      { 686, 5, 796, 32 }, false });
+    g_toolbarButtons.push_back({ IDM_EDIT_CHAT_COLORS,  L"🎨 Цвета",           { 646, 5, 730, 32 }, false });
 
-    g_toolbarButtons.push_back({ IDM_EDIT_FIND_REPLACE, L"🔍 Поиск",           { 804, 5, 880, 32 }, false });
+    g_toolbarButtons.push_back({ IDM_EDIT_FIND_REPLACE, L"🔍 Поиск",           { 736, 5, 810, 32 }, false });
 
-    g_toolbarButtons.push_back({ IDM_THEME_TOGGLE,      L"◐ Тема",             { 888, 5, 956, 32 }, false });
+    g_toolbarButtons.push_back({ IDM_FTP_MANAGER,       L"🌐 FTP",             { 816, 5, 886, 32 }, false });
+
+    g_toolbarButtons.push_back({ IDM_VIEW_OUTLINE,      L"📑 Структура",       { 892, 5, 988, 32 }, false });
+
+    g_toolbarButtons.push_back({ IDM_THEME_TOGGLE,      L"◐ Тема",             { 994, 5, 1066, 32 }, false });
 
 }
 
@@ -4014,9 +8374,19 @@ void RebuildMenu() {
 
     AppendMenuW(hFile, MF_STRING, IDM_FILE_SAVE, loc[currentLang][3]);
 
+    AppendMenuW(hFile, MF_STRING, IDM_FILE_SAVEALL, loc[currentLang][16]);
+
     AppendMenuW(hFile, MF_STRING, IDM_FILE_SAVEAS, loc[currentLang][4]);
 
     AppendMenuW(hFile, MF_SEPARATOR, 0, NULL);
+
+    AppendMenuW(hFile, MF_STRING, IDM_FTP_MANAGER, L"FTP-менеджер...\tCtrl+Alt+F");
+
+    AppendMenuW(hFile, MF_STRING, IDM_FTP_UPLOAD_ACTIVE, L"Отправить текущий файл на FTP");
+
+    AppendMenuW(hFile, MF_SEPARATOR, 0, NULL);
+
+    AppendMenuW(hFile, MF_STRING, IDM_TAB_CLOSE_CURRENT, L"Закрыть текущую вкладку\tCtrl+W");
 
     AppendMenuW(hFile, MF_STRING, IDM_FILE_OPEN_FOLDER, loc[currentLang][5]);
 
@@ -4032,13 +8402,25 @@ void RebuildMenu() {
 
     AppendMenuW(hEdit, MF_STRING, IDM_EDIT_GOTO_LINE, loc[currentLang][9]);
 
+    AppendMenuW(hEdit, MF_STRING, IDM_EDIT_SELECT_ALL_OCC, L"Мультикурсор: выделить все совпадения\tCtrl+Shift+L");
+
     AppendMenuW(hEdit, MF_STRING, IDM_EDIT_DUPLICATE, loc[currentLang][10]);
 
-    AppendMenuW(hEdit, MF_STRING, IDM_EDIT_COMMENT, L"Закомментировать строку\tCtrl+/");
+    AppendMenuW(hEdit, MF_STRING, IDM_EDIT_COMMENT, L"Закомментировать строки\tCtrl+/");
 
     AppendMenuW(hEdit, MF_STRING, IDM_EDIT_LINE_UP, L"Переместить строку вверх\tAlt+Up");
 
     AppendMenuW(hEdit, MF_STRING, IDM_EDIT_LINE_DOWN, L"Переместить строку вниз\tAlt+Down");
+
+    AppendMenuW(hEdit, MF_SEPARATOR, 0, NULL);
+
+    AppendMenuW(hEdit, MF_STRING, IDM_EDIT_AUTOCOMPLETE, loc[currentLang][17]);
+
+    AppendMenuW(hEdit, MF_STRING, IDM_EDIT_FORMAT_CODE, loc[currentLang][18]);
+
+    AppendMenuW(hEdit, MF_STRING, IDM_EDIT_FOLD_ALL, L"Свернуть все блоки кода\tCtrl+Shift+[");
+
+    AppendMenuW(hEdit, MF_STRING, IDM_EDIT_UNFOLD_ALL, L"Развернуть все блоки кода\tCtrl+Shift+]");
 
     AppendMenuW(hEdit, MF_SEPARATOR, 0, NULL);
 
@@ -4048,9 +8430,27 @@ void RebuildMenu() {
 
 
 
+    HMENU hView = CreatePopupMenu();
+
+    AppendMenuW(hView, MF_STRING | (g_showOutline ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_OUTLINE, loc[currentLang][20]);
+
+    AppendMenuW(hView, MF_STRING | (g_wordWrap ? MF_CHECKED : MF_UNCHECKED), IDM_VIEW_WORDWRAP, loc[currentLang][21]);
+
+    AppendMenuW(hView, MF_SEPARATOR, 0, NULL);
+
+    AppendMenuW(hView, MF_STRING, IDM_VIEW_ZOOM_IN, loc[currentLang][22]);
+
+    AppendMenuW(hView, MF_STRING, IDM_VIEW_ZOOM_OUT, loc[currentLang][23]);
+
+    AppendMenuW(hView, MF_STRING, IDM_VIEW_ZOOM_RESET, L"Сбросить масштаб\tCtrl+0");
+
+
+
     HMENU hBuild = CreatePopupMenu();
 
     AppendMenuW(hBuild, MF_STRING, IDM_RUN_SMART, loc[currentLang][13]);
+
+    AppendMenuW(hBuild, MF_STRING, IDM_RUN_AND_UPLOAD, L"Собрать и выгрузить .smx на FTP\tF6");
 
     AppendMenuW(hBuild, MF_SEPARATOR, 0, NULL);
 
@@ -4064,9 +8464,15 @@ void RebuildMenu() {
 
     HMENU hTheme = CreatePopupMenu();
 
-    AppendMenuW(hTheme, MF_STRING | (isDarkTheme ? MF_CHECKED : MF_UNCHECKED), IDM_THEME_DARK, L"Темная (Dark+)");
+    AppendMenuW(hTheme, MF_STRING | (currentTheme == 0 ? MF_CHECKED : MF_UNCHECKED), IDM_THEME_DARK, L"VS Code Dark+");
 
-    AppendMenuW(hTheme, MF_STRING | (!isDarkTheme ? MF_CHECKED : MF_UNCHECKED), IDM_THEME_LIGHT, L"Светлая (Light+)");
+    AppendMenuW(hTheme, MF_STRING | (currentTheme == 1 ? MF_CHECKED : MF_UNCHECKED), IDM_THEME_LIGHT, L"VS Code Light+");
+
+    AppendMenuW(hTheme, MF_STRING | (currentTheme == 2 ? MF_CHECKED : MF_UNCHECKED), IDM_THEME_CYBER, L"Cyber Neon / Dracula");
+
+    AppendMenuW(hTheme, MF_STRING | (currentTheme == 3 ? MF_CHECKED : MF_UNCHECKED), IDM_THEME_MONOKAI, L"Monokai Pro");
+
+    AppendMenuW(hTheme, MF_STRING | (currentTheme == 4 ? MF_CHECKED : MF_UNCHECKED), IDM_THEME_ONEDARK, L"One Dark Pro");
 
 
 
@@ -4090,13 +8496,17 @@ void RebuildMenu() {
 
     AppendMenuW(hSettings, MF_SEPARATOR, 0, NULL);
 
-    AppendMenuW(hSettings, MF_STRING, IDM_ABOUT, L"О программе Kova Code (v1.0.0)");
+    AppendMenuW(hSettings, MF_STRING, IDM_CHANGELOG, L"Лог обновлений");
+
+    AppendMenuW(hSettings, MF_STRING, IDM_ABOUT, L"О программе Kova Code (v1.3.0)");
 
 
 
     AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFile, loc[currentLang][0]);
 
     AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hEdit, loc[currentLang][7]);
+
+    AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hView, loc[currentLang][19]);
 
     AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hBuild, loc[currentLang][12]);
 
@@ -4216,6 +8626,14 @@ void ResizeLayout() {
 
 
 
+    int outlineW = (g_showOutline && rc.right >= 520) ? g_outlineWidth : 0;
+
+    int editorWidth = rc.right - outlineW;
+
+    if (editorWidth < 200) editorWidth = rc.right;
+
+
+
     // Синхронное изменение размеров окон за один проход без разрывов при растягивании
 
     HDWP hdwp = BeginDeferWindowPos(2);
@@ -4228,7 +8646,7 @@ void ResizeLayout() {
 
         if (currentTab >= 0 && currentTab < (int)tabs.size()) {
 
-            hdwp = DeferWindowPos(hdwp, tabs[currentTab].hwndEditor, NULL, 0, editorTop, rc.right, editorHeight,
+            hdwp = DeferWindowPos(hdwp, tabs[currentTab].hwndEditor, NULL, 0, editorTop, editorWidth, editorHeight,
 
                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_SHOWWINDOW);
 
@@ -4264,6 +8682,12 @@ void SwitchTab(int index) {
 
         currentTab = index;
 
+        g_outlineScroll = 0;
+
+        g_hoverOutlineIdx = -1;
+
+        UpdateOutline(tabs[currentTab]);
+
         ResizeLayout();
 
         SetFocus(tabs[currentTab].hwndEditor);
@@ -4278,9 +8702,45 @@ void CreateOrReplaceTab(const wchar_t* path = L"Новый файл.txt");
 
 
 
+bool ConfirmCloseTab(int index) {
+
+    if (index < 0 || index >= (int)tabs.size()) return true;
+
+    if (!tabs[index].isModified) return true;
+
+
+
+    const wchar_t* fn = wcsrchr(tabs[index].filePath.c_str(), L'\\');
+
+    fn = fn ? fn + 1 : tabs[index].filePath.c_str();
+
+    std::wstring msg = std::wstring(L"Сохранить изменения в файле «") + fn + L"» перед закрытием?";
+
+    int res = MessageBoxW(hwndMain, msg.c_str(), L"Kova Code Studio", MB_YESNOCANCEL | MB_ICONQUESTION);
+
+    if (res == IDCANCEL) return false;
+
+    if (res == IDYES) {
+
+        SwitchTab(index);
+
+        SaveCurrentFile(false);
+
+        if (tabs[index].isModified) return false;
+
+    }
+
+    return true;
+
+}
+
+
+
 void CloseTab(int index) {
 
     if (index < 0 || index >= (int)tabs.size()) return;
+
+    if (!ConfirmCloseTab(index)) return;
 
     DestroyWindow(tabs[index].hwndEditor);
 
@@ -4310,21 +8770,63 @@ void CloseOtherTabs(int keepIndex) {
 
     if (keepIndex < 0 || keepIndex >= (int)tabs.size()) return;
 
-    TabData keep = tabs[keepIndex];
+    for (int i = (int)tabs.size() - 1; i >= 0; i--) {
 
-    for (int i = 0; i < (int)tabs.size(); i++) {
+        if (i == keepIndex) continue;
 
-        if (i != keepIndex) DestroyWindow(tabs[i].hwndEditor);
+        if (!ConfirmCloseTab(i)) {
+
+            SwitchTab(currentTab);
+
+            return;
+
+        }
+
+        DestroyWindow(tabs[i].hwndEditor);
+
+        tabs.erase(tabs.begin() + i);
+
+        if (i < keepIndex) keepIndex--;
 
     }
-
-    tabs.clear();
-
-    tabs.push_back(keep);
 
     currentTab = 0;
 
     SwitchTab(0);
+
+}
+
+
+
+void SaveAllFiles() {
+
+    if (tabs.empty()) return;
+
+    int orig = currentTab;
+
+    int saved = 0;
+
+    for (int i = 0; i < (int)tabs.size(); i++) {
+
+        if (tabs[i].isModified) {
+
+            SwitchTab(i);
+
+            SaveCurrentFile(false);
+
+            if (!tabs[i].isModified) saved++;
+
+        }
+
+    }
+
+    if (orig >= 0 && orig < (int)tabs.size()) SwitchTab(orig);
+
+    wchar_t msg[128];
+
+    swprintf(msg, 128, L"> Сохранено измененных вкладок: %d.", saved);
+
+    LogToConsoleW(msg, LOG_SUCCESS);
 
 }
 
@@ -4352,7 +8854,19 @@ void CreateOrReplaceTab(const wchar_t* path) {
 
     SetupEditor(hEd);
 
-    TabData td = { hEd, path, GetLang(path), false, {0,0,0,0}, {0,0,0,0} };
+    TabData td;
+
+    td.hwndEditor = hEd;
+
+    td.filePath = path;
+
+    td.lang = GetLang(path);
+
+    td.isModified = false;
+
+    td.rcTab = { 0,0,0,0 };
+
+    td.rcClose = { 0,0,0,0 };
 
     tabs.push_back(td);
 
@@ -4382,7 +8896,7 @@ bool LoadFileToActive(const wchar_t* path) {
 
     fseek(fp, 0, SEEK_SET);
 
-    if (size < 0) {
+    if (size < 0 || size > 64 * 1024 * 1024) {
 
         fclose(fp);
 
@@ -4421,6 +8935,8 @@ bool LoadFileToActive(const wchar_t* path) {
         tabs[currentTab].isModified = false;
 
         UpdateLineMargin(tabs[currentTab].hwndEditor);
+
+        UpdateOutline(tabs[currentTab]);
 
     }
 
@@ -4516,15 +9032,17 @@ void OpenFileDlg() {
 
     ofn.lpstrFilter =
 
-        L"Все поддерживаемые (*.txt;*.sp;*.inc;*.py;*.html;*.cpp)\0*.txt;*.sp;*.inc;*.py;*.html;*.php;*.cpp;*.h\0"
+        L"Все поддерживаемые (*.sp;*.inc;*.cfg;*.ini;*.py;*.html;*.cpp;*.txt)\0*.txt;*.sp;*.inc;*.cfg;*.ini;*.vdf;*.kv;*.json;*.bat;*.cmd;*.py;*.html;*.php;*.css;*.js;*.cpp;*.h\0"
 
         L"SourcePawn (*.sp;*.inc)\0*.sp;*.inc\0"
+
+        L"Конфиги / KeyValues (*.cfg;*.ini;*.vdf;*.kv)\0*.cfg;*.ini;*.vdf;*.kv;*.json\0"
 
         L"Текстовые файлы (*.txt)\0*.txt\0"
 
         L"Python (*.py)\0*.py\0"
 
-        L"Web (*.html;*.php)\0*.html;*.php\0"
+        L"Web (*.html;*.php;*.css;*.js)\0*.html;*.php;*.css;*.js\0"
 
         L"Все файлы (*.*)\0*.*\0";
 
@@ -4574,6 +9092,8 @@ void SaveCurrentFile(bool forceSaveAs) {
 
             L"Инклюд SourcePawn (*.inc)\0*.inc\0"
 
+            L"Конфиг / KeyValues (*.cfg;*.ini)\0*.cfg;*.ini;*.vdf\0"
+
             L"Скрипт Python (*.py)\0*.py\0"
 
             L"Веб-страница HTML (*.html)\0*.html\0"
@@ -4612,11 +9132,13 @@ void SaveCurrentFile(bool forceSaveAs) {
 
             case 3: file += L".inc";  break;
 
-            case 4: file += L".py";   break;
+            case 4: file += L".cfg";  break;
 
-            case 5: file += L".html"; break;
+            case 5: file += L".py";   break;
 
-            case 6: file += L".cpp";  break;
+            case 6: file += L".html"; break;
+
+            case 7: file += L".cpp";  break;
 
             default: break;
 
@@ -4631,6 +9153,8 @@ void SaveCurrentFile(bool forceSaveAs) {
         tabs[currentTab].lang = GetLang(file);
 
         RelexTab(tabs[currentTab].hwndEditor);
+
+        UpdateOutline(tabs[currentTab]);
 
     }
 
@@ -4674,9 +9198,17 @@ void SaveCurrentFile(bool forceSaveAs) {
 
         }
 
+        UpdateOutline(tabs[currentTab]);
+
         SaveConfig();
 
         InvalidateRect(hwndMain, NULL, FALSE);
+
+        if (g_ftpAutoUploadOnSave && !tabs[currentTab].ftpRemotePath.empty() && g_hFtp) {
+
+            FtpUploadLocalFile(file, tabs[currentTab].ftpRemotePath);
+
+        }
 
     }
 
@@ -4692,7 +9224,7 @@ void SaveCurrentFile(bool forceSaveAs) {
 
 // ============================================================
 
-//  ОТРИСОВКА ТУЛБАРА, КАСТОМНОЙ ПОЛОСЫ ВКЛАДОК И СТАТУС-БАРА
+//  ОТРИСОВКА ТУЛБАРА, КАСТОМНОЙ ПОЛОСЫ ВКЛАДОК, OUTLINE И СТАТУС-БАРА
 
 // ============================================================
 
@@ -4732,7 +9264,7 @@ void PaintMainWindowChrome(HWND hwnd, HDC hdcReal) {
 
 
 
-    // 1. ВЕРХНИЙ ТУЛБАР БЫСТРОГО ДОСТУПА
+    // 1. ВЕРХНИЙ ТУЛБАР БЫСТРЫХ ДЕЙСТВИЙ
 
     RECT rcToolbar = { 0, 0, rc.right, g_toolbarHeight };
 
@@ -4756,15 +9288,19 @@ void PaintMainWindowChrome(HWND hwnd, HDC hdcReal) {
 
         if (b.isAccent) {
 
-            btnBg = hov ? RGB(145, 80, 255) : pal.uiAccent;
+            int r = (int)GetRValue(pal.uiAccent) + 22; if (r > 255) r = 255;
+
+            int g = (int)GetGValue(pal.uiAccent) + 22; if (g > 255) g = 255;
+
+            int bl = (int)GetBValue(pal.uiAccent) + 22; if (bl > 255) bl = 255;
+
+            btnBg = hov ? RGB(r, g, bl) : pal.uiAccent;
 
         }
 
         else {
 
-            btnBg = hov ? (isDarkTheme ? RGB(52, 52, 62) : RGB(210, 210, 222))
-
-                : (isDarkTheme ? RGB(38, 38, 45) : RGB(225, 225, 234));
+            btnBg = hov ? pal.uiTabHover : (isDarkTheme ? pal.uiTabInactive : RGB(225, 225, 234));
 
         }
 
@@ -4776,23 +9312,23 @@ void PaintMainWindowChrome(HWND hwnd, HDC hdcReal) {
 
 
 
+        if (b.id == IDM_VIEW_OUTLINE && g_showOutline) {
+
+            RECT rInd = { b.rc.left, b.rc.bottom - 2, b.rc.right, b.rc.bottom };
+
+            HBRUSH hInd = CreateSolidBrush(pal.uiAccent);
+
+            FillRect(hdc, &rInd, hInd);
+
+            DeleteObject(hInd);
+
+        }
+
+
+
         SetTextColor(hdc, (b.isAccent || isDarkTheme) ? RGB(255, 255, 255) : RGB(25, 25, 30));
 
         DrawTextW(hdc, b.label, -1, (LPRECT)&b.rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    }
-
-
-
-    if (rc.right > 1120) {
-
-        SelectObject(hdc, hUIBoldFont);
-
-        SetTextColor(hdc, isDarkTheme ? RGB(145, 145, 165) : RGB(100, 100, 120));
-
-        RECT rcBadge = { rc.right - 210, 0, rc.right - 14, g_toolbarHeight };
-
-        DrawTextW(hdc, L"Kova Code v1.0.0  •  ANR1S", -1, &rcBadge, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
     }
 
@@ -4950,13 +9486,253 @@ void PaintMainWindowChrome(HWND hwnd, HDC hdcReal) {
 
 
 
-    // 3. ЗАГОЛОВОК КОНСОЛИ (SPLITTER BAR)
+    int editorTop = g_toolbarHeight + g_tabHeight;
 
     int consoleBottom = rc.bottom - g_statusHeight;
 
     int consoleTop = consoleBottom - g_consoleHeight;
 
     int hdrTop = consoleTop - g_consoleHeaderHeight;
+
+
+
+    // 2.5 БОКОВАЯ ПАНЕЛЬ «СТРУКТУРА КОДА / OUTLINE» (СПРАВА)
+
+    if (g_showOutline && rc.right >= 520) {
+
+        int oLeft = rc.right - g_outlineWidth;
+
+        RECT rcOut = { oLeft, editorTop, rc.right, hdrTop };
+
+        HBRUSH hbrOut = CreateSolidBrush(pal.lineNumBg);
+
+        FillRect(hdc, &rcOut, hbrOut);
+
+        DeleteObject(hbrOut);
+
+
+
+        MoveToEx(hdc, oLeft, editorTop, NULL);
+
+        LineTo(hdc, oLeft, hdrTop);
+
+
+
+        int oHdrBottom = editorTop + 28;
+
+        RECT rcOutHdr = { oLeft + 1, editorTop, rc.right, oHdrBottom };
+
+        HBRUSH hbrOutHdr = CreateSolidBrush(pal.uiTopBar);
+
+        FillRect(hdc, &rcOutHdr, hbrOutHdr);
+
+        DeleteObject(hbrOutHdr);
+
+
+
+        MoveToEx(hdc, oLeft + 1, oHdrBottom - 1, NULL);
+
+        LineTo(hdc, rc.right, oHdrBottom - 1);
+
+
+
+        int symCount = (currentTab >= 0) ? (int)tabs[currentTab].outline.size() : 0;
+
+        wchar_t oHdrTxt[64];
+
+        swprintf(oHdrTxt, 64, L"СТРУКТУРА (%d)", symCount);
+
+        SelectObject(hdc, hSmallFont);
+
+        SetTextColor(hdc, isDarkTheme ? RGB(195, 195, 215) : RGB(40, 40, 55));
+
+        RECT rcOutHdrTxt = { oLeft + 10, editorTop, rc.right - 30, oHdrBottom };
+
+        DrawTextW(hdc, oHdrTxt, -1, &rcOutHdrTxt, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+
+
+        g_rcOutlineClose = { rc.right - 26, editorTop + 4, rc.right - 6, oHdrBottom - 4 };
+
+        if (g_hoverOutlineClose) {
+
+            HBRUSH hbrOC = CreateSolidBrush(RGB(215, 65, 65));
+
+            FillRect(hdc, &g_rcOutlineClose, hbrOC);
+
+            DeleteObject(hbrOC);
+
+        }
+
+        SetTextColor(hdc, g_hoverOutlineClose ? RGB(255, 255, 255) : (isDarkTheme ? RGB(170, 170, 185) : RGB(80, 80, 95)));
+
+        DrawTextW(hdc, L"✕", -1, &g_rcOutlineClose, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+
+
+        if (currentTab >= 0) {
+
+            auto& items = tabs[currentTab].outline;
+
+            int listTop = oHdrBottom + 2;
+
+            int listH = hdrTop - listTop;
+
+            int rowH = 24;
+
+            int totalRows = (int)items.size();
+
+            int visibleRows = (listH > 0) ? (listH / rowH) : 0;
+
+            int maxScroll = totalRows - visibleRows;
+
+            if (maxScroll < 0) maxScroll = 0;
+
+            if (g_outlineScroll > maxScroll) g_outlineScroll = maxScroll;
+
+            if (g_outlineScroll < 0) g_outlineScroll = 0;
+
+
+
+            int curEdLine = (int)SendActive(SCI_LINEFROMPOSITION, SendActive(SCI_GETCURRENTPOS));
+
+            int activeIdx = -1;
+
+            for (int i = 0; i < totalRows; i++) {
+
+                if (items[i].line <= curEdLine) activeIdx = i;
+
+            }
+
+
+
+            int savedDC = SaveDC(hdc);
+
+            IntersectClipRect(hdc, oLeft + 1, listTop, rc.right, hdrTop);
+
+
+
+            if (items.empty()) {
+
+                SelectObject(hdc, hSmallFont);
+
+                SetTextColor(hdc, pal.lineNumFg);
+
+                RECT rcEmpty = { oLeft + 10, listTop + 12, rc.right - 10, listTop + 40 };
+
+                DrawTextW(hdc, L"Символы не найдены", -1, &rcEmpty, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+            }
+
+            else {
+
+                for (int i = 0; i < totalRows; i++) {
+
+                    int y = listTop + (i - g_outlineScroll) * rowH;
+
+                    if (y + rowH <= listTop || y >= hdrTop) {
+
+                        items[i].rc = { 0, 0, 0, 0 };
+
+                        continue;
+
+                    }
+
+                    RECT rr = { oLeft + 1, y, rc.right, y + rowH };
+
+                    items[i].rc = rr;
+
+
+
+                    bool isAct = (i == activeIdx);
+
+                    bool isHov = (i == g_hoverOutlineIdx);
+
+                    if (isHov || isAct) {
+
+                        HBRUSH hbrRow = CreateSolidBrush(isHov ? pal.uiTabHover : pal.caretLine);
+
+                        FillRect(hdc, &rr, hbrRow);
+
+                        DeleteObject(hbrRow);
+
+                    }
+
+                    if (isAct) {
+
+                        RECT rBar = { rr.left, rr.top + 2, rr.left + 3, rr.bottom - 2 };
+
+                        HBRUSH hbrBar = CreateSolidBrush(pal.uiAccent);
+
+                        FillRect(hdc, &rBar, hbrBar);
+
+                        DeleteObject(hbrBar);
+
+                    }
+
+
+
+                    const wchar_t* tag = L"fn";
+
+                    COLORREF tagClr = pal.func;
+
+                    if (items[i].kind == 1) { tag = L"ev"; tagClr = pal.pre; }
+
+                    else if (items[i].kind == 2) { tag = L"#"; tagClr = pal.type; }
+
+                    else if (items[i].kind == 3) { tag = L"§"; tagClr = pal.tag; }
+
+
+
+                    SelectObject(hdc, hSmallFont);
+
+                    SetTextColor(hdc, tagClr);
+
+                    RECT rTag = { rr.left + 8, rr.top, rr.left + 28, rr.bottom };
+
+                    DrawTextW(hdc, tag, -1, &rTag, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+
+
+                    wchar_t lnBuf[16];
+
+                    swprintf(lnBuf, 16, L":%d", items[i].line + 1);
+
+                    SetTextColor(hdc, pal.lineNumFg);
+
+                    RECT rLn = { rr.right - 44, rr.top, rr.right - 6, rr.bottom };
+
+                    DrawTextW(hdc, lnBuf, -1, &rLn, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+
+
+                    SelectObject(hdc, isAct ? hUIBoldFont : hUIFont);
+
+                    SetTextColor(hdc, isAct ? (isDarkTheme ? RGB(255, 255, 255) : RGB(15, 15, 20)) : pal.fg);
+
+                    RECT rLbl = { rr.left + 30, rr.top, rr.right - 46, rr.bottom };
+
+                    DrawTextW(hdc, items[i].label.c_str(), -1, &rLbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+                }
+
+            }
+
+            RestoreDC(hdc, savedDC);
+
+        }
+
+    }
+
+    else {
+
+        g_rcOutlineClose = { 0, 0, 0, 0 };
+
+    }
+
+
+
+    // 3. ЗАГОЛОВОК КОНСОЛИ (SPLITTER BAR)
 
     RECT rcConHdr = { 0, hdrTop, rc.right, consoleTop };
 
@@ -5048,13 +9824,15 @@ void PaintMainWindowChrome(HWND hwnd, HDC hdcReal) {
 
     const wchar_t* compState = (wcslen(szCompilerPath) > 0) ? L"spcomp: Подключен ✓" : L"spcomp: Не выбран";
 
+    const wchar_t* wrapState = g_wordWrap ? L"  |  Wrap: ON" : L"";
+
 
 
     wchar_t statBuf[512];
 
-    swprintf(statBuf, 512, L"Стр %d, Стлб %d   |   Символов: %d   |   Масштаб: %d%%   |   UTF-8   |   %s   |   %s",
+    swprintf(statBuf, 512, L"Стр %d, Стлб %d   |   Символов: %d   |   Масштаб: %d%%   |   %s   |   %s   |   %s%s",
 
-        line, col, totalLen, zoom, langName, compState);
+        line, col, totalLen, zoom, langName, GetThemeName(currentTheme), compState, wrapState);
 
 
 
@@ -5140,19 +9918,53 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
         LogToConsoleW(L"==============================================================", LOG_ACCENT);
 
-        LogToConsoleW(L"> Kova Code Studio v1.0.0 Release (Разработчик: ANR1S) готов к работе!", LOG_SUCCESS);
+        LogToConsoleW(L"> Kova Code Studio v1.3.0 Release (Разработчик: ANR1S) готов к работе!", LOG_SUCCESS);
 
-        LogToConsoleW(L"> Новое: Палитра цветов чата + Генератор кода [🎨 Цвета чата] (Ctrl+M) и перемещение строк (Alt+Up/Down).", LOG_NORMAL);
+        LogToConsoleW(L"> Новое: FTP-менеджер (Ctrl+Alt+F), Сборка + .smx на FTP (F6), подсветка слов, мультикурсор (Ctrl+Shift+L).", LOG_NORMAL);
 
         if (wcslen(szCompilerPath) > 0) {
 
-            LogToConsoleW((std::wstring(L"> Загружен сохраненный путь к spcomp.exe: ") + szCompilerPath).c_str(), LOG_NORMAL);
+            LogToConsoleW((std::wstring(L"> Подключен компилятор SourcePawn: ") + szCompilerPath).c_str(), LOG_NORMAL);
 
         }
 
         RestoreSavedSession();
 
         return 0;
+
+    }
+
+
+
+    case WM_TIMER: {
+
+        if (wParam == IDT_OUTLINE_UPDATE) {
+
+            KillTimer(hwnd, IDT_OUTLINE_UPDATE);
+
+            if (currentTab >= 0 && currentTab < (int)tabs.size()) {
+
+                UpdateOutline(tabs[currentTab]);
+
+                if (g_showOutline) {
+
+                    RECT rc;
+
+                    GetClientRect(hwnd, &rc);
+
+                    RECT rcOut = { rc.right - g_outlineWidth, g_toolbarHeight + g_tabHeight, rc.right, rc.bottom - g_statusHeight - g_consoleHeight - g_consoleHeaderHeight };
+
+                    InvalidateRect(hwnd, &rcOut, FALSE);
+
+                }
+
+            }
+
+            return 0;
+
+        }
+
+        break;
 
     }
 
@@ -5302,6 +10114,46 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
         }
 
+
+
+        int hovOut = -1;
+
+        bool hovOutClose = false;
+
+        if (g_showOutline && rc.right >= 520 && pt.x >= rc.right - g_outlineWidth && pt.y >= g_toolbarHeight + g_tabHeight && pt.y < hdrTop) {
+
+            if (PtInRect(&g_rcOutlineClose, pt)) hovOutClose = true;
+
+            if (currentTab >= 0) {
+
+                for (int i = 0; i < (int)tabs[currentTab].outline.size(); i++) {
+
+                    if (PtInRect(&tabs[currentTab].outline[i].rc, pt)) {
+
+                        hovOut = i;
+
+                        break;
+
+                    }
+
+                }
+
+            }
+
+        }
+
+        if (hovOut != g_hoverOutlineIdx || hovOutClose != g_hoverOutlineClose) {
+
+            g_hoverOutlineIdx = hovOut;
+
+            g_hoverOutlineClose = hovOutClose;
+
+            RECT rcOut = { rc.right - g_outlineWidth, g_toolbarHeight + g_tabHeight, rc.right, hdrTop };
+
+            InvalidateRect(hwnd, &rcOut, FALSE);
+
+        }
+
         return 0;
 
     }
@@ -5377,6 +10229,54 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
         int consoleTop = rc.bottom - g_statusHeight - g_consoleHeight;
 
         int hdrTop = consoleTop - g_consoleHeaderHeight;
+
+
+
+        if (g_showOutline && rc.right >= 520 && pt.x >= rc.right - g_outlineWidth && pt.y >= g_toolbarHeight + g_tabHeight && pt.y < hdrTop) {
+
+            if (PtInRect(&g_rcOutlineClose, pt)) {
+
+                g_showOutline = false;
+
+                SaveConfig();
+
+                ResizeLayout();
+
+                RebuildMenu();
+
+                return 0;
+
+            }
+
+            if (currentTab >= 0) {
+
+                for (const auto& item : tabs[currentTab].outline) {
+
+                    if (PtInRect(&item.rc, pt)) {
+
+                        HWND ed = tabs[currentTab].hwndEditor;
+
+                        SendEd(ed, SCI_GOTOLINE, item.line);
+
+                        SendEd(ed, SCI_SCROLLCARET);
+
+                        SetFocus(ed);
+
+                        InvalidateRect(hwnd, NULL, FALSE);
+
+                        return 0;
+
+                    }
+
+                }
+
+            }
+
+            return 0;
+
+        }
+
+
 
         if (pt.y >= hdrTop && pt.y <= consoleTop) {
 
@@ -5550,6 +10450,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
             HandleBraces(ed);
 
+            HighlightWordOccurrences(ed);
+
             RECT rc;
 
             GetClientRect(hwnd, &rc);
@@ -5557,6 +10459,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
             RECT rcStat = { 0, rc.bottom - g_statusHeight, rc.right, rc.bottom };
 
             InvalidateRect(hwnd, &rcStat, FALSE);
+
+            if (g_showOutline && rc.right >= 520) {
+
+                int hdrTop = rc.bottom - g_statusHeight - g_consoleHeight - g_consoleHeaderHeight;
+
+                RECT rcOut = { rc.right - g_outlineWidth, g_toolbarHeight + g_tabHeight, rc.right, hdrTop };
+
+                InvalidateRect(hwnd, &rcOut, FALSE);
+
+            }
 
             break;
 
@@ -5612,6 +10524,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
                 }
 
+                SetTimer(hwnd, IDT_OUTLINE_UPDATE, 220, NULL);
+
             }
 
             break;
@@ -5658,13 +10572,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
         case IDM_FILE_SAVE:         SaveCurrentFile(false); break;
 
+        case IDM_FILE_SAVEALL:      SaveAllFiles(); break;
+
         case IDM_FILE_SAVEAS:       SaveCurrentFile(true); break;
 
         case IDM_FILE_OPEN_FOLDER:  OpenContainingFolder(currentTab); break;
 
-        case IDM_FILE_EXIT:         PostQuitMessage(0); break;
+        case IDM_FILE_EXIT:         SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
+
+        case IDM_FTP_MANAGER:       ShowFtpManagerDialog(); break;
+
+        case IDM_FTP_UPLOAD_ACTIVE: FtpUploadActiveTab(); break;
 
         case IDM_RUN_SMART:         RunSmartDispatcher(); break;
+
+        case IDM_RUN_AND_UPLOAD:    RunSmartAndUploadSmx(); break;
 
         case IDM_SET_COMPILER:      SelectCompilerDlg(); break;
 
@@ -5674,6 +10596,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
         case IDM_EDIT_GOTO_LINE:    ShowGotoLineDialog(); break;
 
+        case IDM_EDIT_SELECT_ALL_OCC: SelectAllWordOccurrences(); break;
+
         case IDM_EDIT_DUPLICATE:    DuplicateCurrentLine(); break;
 
         case IDM_EDIT_COMMENT:      ToggleLineComment(); break;
@@ -5682,11 +10606,77 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
         case IDM_EDIT_LINE_DOWN:    MoveSelectedLinesDown(); break;
 
+        case IDM_EDIT_AUTOCOMPLETE: if (currentTab >= 0) TriggerAutoComplete(tabs[currentTab], true); break;
+
+        case IDM_EDIT_FORMAT_CODE:  FormatActiveCode(); break;
+
+        case IDM_EDIT_FOLD_ALL:     FoldAllCode(true); break;
+
+        case IDM_EDIT_UNFOLD_ALL:   FoldAllCode(false); break;
+
         case IDM_EDIT_SNIPPET_SP:   InsertSourcePawnTemplate(); break;
 
         case IDM_EDIT_CHAT_COLORS:  ShowChatColorsDialog(); break;
 
+        case IDM_VIEW_OUTLINE:
+
+            g_showOutline = !g_showOutline;
+
+            SaveConfig();
+
+            ResizeLayout();
+
+            RebuildMenu();
+
+            break;
+
+        case IDM_VIEW_WORDWRAP:
+
+            g_wordWrap = !g_wordWrap;
+
+            for (auto& tb : tabs) {
+
+                SendEd(tb.hwndEditor, SCI_SETWRAPMODE, g_wordWrap ? SC_WRAP_WORD : SC_WRAP_NONE, 0);
+
+            }
+
+            SaveConfig();
+
+            RebuildMenu();
+
+            InvalidateRect(hwnd, NULL, FALSE);
+
+            LogToConsoleW(g_wordWrap ? L"> Перенос строк: ВКЛ (Alt+Z)." : L"> Перенос строк: ВЫКЛ.", LOG_ACCENT);
+
+            break;
+
+        case IDM_VIEW_ZOOM_IN:
+
+            SendActive(SCI_ZOOMIN);
+
+            InvalidateRect(hwnd, NULL, FALSE);
+
+            break;
+
+        case IDM_VIEW_ZOOM_OUT:
+
+            SendActive(SCI_ZOOMOUT);
+
+            InvalidateRect(hwnd, NULL, FALSE);
+
+            break;
+
+        case IDM_VIEW_ZOOM_RESET:
+
+            SendActive(SCI_SETZOOM, 0);
+
+            InvalidateRect(hwnd, NULL, FALSE);
+
+            break;
+
         case IDM_TAB_CLOSE:         CloseTab(g_contextMenuTabIdx); break;
+
+        case IDM_TAB_CLOSE_CURRENT: CloseTab(currentTab); break;
 
         case IDM_TAB_CLOSE_OTHERS:  CloseOtherTabs(g_contextMenuTabIdx); break;
 
@@ -5694,11 +10684,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
         case IDM_TAB_COPY_PATH:     CopyFilePathToClipboard(g_contextMenuTabIdx); break;
 
-        case IDM_THEME_DARK:        isDarkTheme = true;  SaveConfig(); ApplyThemeToAll(); RebuildMenu(); break;
+        case IDM_TAB_NEXT:          if (!tabs.empty()) SwitchTab((currentTab + 1) % (int)tabs.size()); break;
 
-        case IDM_THEME_LIGHT:       isDarkTheme = false; SaveConfig(); ApplyThemeToAll(); RebuildMenu(); break;
+        case IDM_TAB_PREV:          if (!tabs.empty()) SwitchTab((currentTab + (int)tabs.size() - 1) % (int)tabs.size()); break;
 
-        case IDM_THEME_TOGGLE:      isDarkTheme = !isDarkTheme; SaveConfig(); ApplyThemeToAll(); RebuildMenu(); break;
+        case IDM_THEME_DARK:        currentTheme = 0; SaveConfig(); ApplyThemeToAll(); RebuildMenu(); break;
+
+        case IDM_THEME_LIGHT:       currentTheme = 1; SaveConfig(); ApplyThemeToAll(); RebuildMenu(); break;
+
+        case IDM_THEME_CYBER:       currentTheme = 2; SaveConfig(); ApplyThemeToAll(); RebuildMenu(); break;
+
+        case IDM_THEME_MONOKAI:     currentTheme = 3; SaveConfig(); ApplyThemeToAll(); RebuildMenu(); break;
+
+        case IDM_THEME_ONEDARK:     currentTheme = 4; SaveConfig(); ApplyThemeToAll(); RebuildMenu(); break;
+
+        case IDM_THEME_TOGGLE:
+
+            currentTheme = (currentTheme + 1) % 5;
+
+            SaveConfig();
+
+            ApplyThemeToAll();
+
+            RebuildMenu();
+
+            LogToConsoleW((std::wstring(L"> Активирована тема: ") + GetThemeName(currentTheme)).c_str(), LOG_ACCENT);
+
+            break;
+
+        case IDM_CHANGELOG:         ShowChangelogWindow(); break;
 
         case IDM_ABOUT:             ShowAboutWindow(); break;
 
@@ -5740,9 +10754,39 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
 
 
+    case WM_CLOSE: {
+
+        for (int i = 0; i < (int)tabs.size(); i++) {
+
+            if (!ConfirmCloseTab(i)) return 0;
+
+        }
+
+        DestroyWindow(hwnd);
+
+        return 0;
+
+    }
+
+
+
     case WM_DESTROY:
 
+        KillTimer(hwnd, IDT_OUTLINE_UPDATE);
+
+        FtpDisconnect();
+
         SaveConfig();
+
+        if (hUIFont) { DeleteObject(hUIFont); hUIFont = NULL; }
+
+        if (hUIBoldFont) { DeleteObject(hUIBoldFont); hUIBoldFont = NULL; }
+
+        if (hTitleFont) { DeleteObject(hTitleFont); hTitleFont = NULL; }
+
+        if (hSmallFont) { DeleteObject(hSmallFont); hSmallFont = NULL; }
+
+        if (hDarkEditBrush) { DeleteObject(hDarkEditBrush); hDarkEditBrush = NULL; }
 
         PostQuitMessage(0);
 
@@ -5780,7 +10824,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
             L"Положите файл Scintilla.dll в папку проекта или рядом с KovaCode.exe.",
 
-            L"Kova Code Studio v1.0.0", MB_OK | MB_ICONERROR);
+            L"Kova Code Studio v1.2.0", MB_OK | MB_ICONERROR);
 
         return 1;
 
@@ -5814,9 +10858,9 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
 
 
-    hwndMain = CreateWindowExW(0, L"KovaCodeClass", L"Kova Code Studio v1.0.0",
+    hwndMain = CreateWindowExW(0, L"KovaCodeClass", L"Kova Code Studio v1.3.0",
 
-        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 1180, 780, NULL, NULL, hInstance, NULL);
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 1240, 800, NULL, NULL, hInstance, NULL);
 
 
 
@@ -5840,6 +10884,14 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
         { FCONTROL | FVIRTKEY, 'S', IDM_FILE_SAVE },
 
+        { FCONTROL | FSHIFT | FVIRTKEY, 'S', IDM_FILE_SAVEALL },
+
+        { FCONTROL | FVIRTKEY, 'W', IDM_TAB_CLOSE_CURRENT },
+
+        { FCONTROL | FVIRTKEY, VK_TAB, IDM_TAB_NEXT },
+
+        { FCONTROL | FSHIFT | FVIRTKEY, VK_TAB, IDM_TAB_PREV },
+
         { FCONTROL | FVIRTKEY, 'F', IDM_EDIT_FIND_REPLACE },
 
         { FCONTROL | FVIRTKEY, 'H', IDM_EDIT_FIND_REPLACE },
@@ -5852,13 +10904,43 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
         { FCONTROL | FVIRTKEY, 'M', IDM_EDIT_CHAT_COLORS },
 
+        { FCONTROL | FVIRTKEY, 'B', IDM_VIEW_OUTLINE },
+
+        { FCONTROL | FVIRTKEY, VK_SPACE, IDM_EDIT_AUTOCOMPLETE },
+
+        { FSHIFT | FALT | FVIRTKEY, 'F', IDM_EDIT_FORMAT_CODE },
+
+        { FALT | FVIRTKEY, 'Z', IDM_VIEW_WORDWRAP },
+
+        { FCONTROL | FVIRTKEY, VK_OEM_PLUS, IDM_VIEW_ZOOM_IN },
+
+        { FCONTROL | FVIRTKEY, VK_ADD, IDM_VIEW_ZOOM_IN },
+
+        { FCONTROL | FVIRTKEY, VK_OEM_MINUS, IDM_VIEW_ZOOM_OUT },
+
+        { FCONTROL | FVIRTKEY, VK_SUBTRACT, IDM_VIEW_ZOOM_OUT },
+
+        { FCONTROL | FVIRTKEY, '0', IDM_VIEW_ZOOM_RESET },
+
+        { FCONTROL | FVIRTKEY, VK_NUMPAD0, IDM_VIEW_ZOOM_RESET },
+
         { FCONTROL | FVIRTKEY, VK_OEM_2, IDM_EDIT_COMMENT },
 
         { FALT | FVIRTKEY, VK_UP, IDM_EDIT_LINE_UP },
 
         { FALT | FVIRTKEY, VK_DOWN, IDM_EDIT_LINE_DOWN },
 
-        { FVIRTKEY, VK_F5, IDM_RUN_SMART }
+        { FCONTROL | FALT | FVIRTKEY, 'F', IDM_FTP_MANAGER },
+
+        { FCONTROL | FSHIFT | FVIRTKEY, 'L', IDM_EDIT_SELECT_ALL_OCC },
+
+        { FCONTROL | FSHIFT | FVIRTKEY, VK_OEM_4, IDM_EDIT_FOLD_ALL },
+
+        { FCONTROL | FSHIFT | FVIRTKEY, VK_OEM_6, IDM_EDIT_UNFOLD_ALL },
+
+        { FVIRTKEY, VK_F5, IDM_RUN_SMART },
+
+        { FVIRTKEY, VK_F6, IDM_RUN_AND_UPLOAD }
 
     };
 
@@ -5869,6 +10951,100 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     MSG msg = { 0 };
 
     while (GetMessageW(&msg, NULL, 0, 0)) {
+
+        if (msg.message == WM_KEYDOWN) {
+
+            if (hwndFindDlg && IsWindow(hwndFindDlg) && (msg.hwnd == hwndFindDlg || IsChild(hwndFindDlg, msg.hwnd))) {
+
+                if (msg.wParam == VK_ESCAPE) {
+
+                    DestroyWindow(hwndFindDlg);
+
+                    if (currentTab >= 0) SetFocus(tabs[currentTab].hwndEditor);
+
+                    continue;
+
+                }
+
+                if (msg.wParam == VK_RETURN) {
+
+                    if (GetKeyState(VK_SHIFT) & 0x8000) DoFindPrev();
+
+                    else DoFindNext();
+
+                    continue;
+
+                }
+
+                if (msg.wParam == VK_TAB) {
+
+                    SetFocus(GetFocus() == hEditFindBox ? hEditReplaceBox : hEditFindBox);
+
+                    continue;
+
+                }
+
+            }
+
+            if (hwndGotoDlg && IsWindow(hwndGotoDlg) && (msg.hwnd == hwndGotoDlg || IsChild(hwndGotoDlg, msg.hwnd))) {
+
+                if (msg.wParam == VK_ESCAPE) {
+
+                    DestroyWindow(hwndGotoDlg);
+
+                    if (currentTab >= 0) SetFocus(tabs[currentTab].hwndEditor);
+
+                    continue;
+
+                }
+
+                if (msg.wParam == VK_RETURN) {
+
+                    ExecuteGotoLine();
+
+                    continue;
+
+                }
+
+            }
+
+        }
+
+
+
+        if (msg.message == WM_MOUSEWHEEL && g_showOutline && currentTab >= 0) {
+
+            POINT pt;
+
+            GetCursorPos(&pt);
+
+            ScreenToClient(hwndMain, &pt);
+
+            RECT rc;
+
+            GetClientRect(hwndMain, &rc);
+
+            int hdrTop = rc.bottom - g_statusHeight - g_consoleHeight - g_consoleHeaderHeight;
+
+            if (rc.right >= 520 && pt.x >= rc.right - g_outlineWidth && pt.y >= g_toolbarHeight + g_tabHeight && pt.y < hdrTop) {
+
+                int delta = GET_WHEEL_DELTA_WPARAM(msg.wParam);
+
+                g_outlineScroll -= (delta > 0 ? 2 : -2);
+
+                if (g_outlineScroll < 0) g_outlineScroll = 0;
+
+                RECT rcOut = { rc.right - g_outlineWidth, g_toolbarHeight + g_tabHeight, rc.right, hdrTop };
+
+                InvalidateRect(hwndMain, &rcOut, FALSE);
+
+                continue;
+
+            }
+
+        }
+
+
 
         if (!TranslateAcceleratorW(hwndMain, hAccel, &msg)) {
 
